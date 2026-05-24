@@ -56,6 +56,10 @@ class SchedulerConfig:
     base_url = 'http://localhost:5100'
     auth = 'Bearer xxxxxxxxxxxxxxxx'
 
+class CustomRunConfig:
+    # Base URL of the judger's custom-run service (web IDE "self-test").
+    base_url = 'http://localhost:5200'
+
 class JudgeConfig:
     Judge_Each_Page = 15                  #评测详情界面每页显示多少题目
 

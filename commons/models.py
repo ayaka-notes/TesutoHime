@@ -210,6 +210,9 @@ class Problem(UseTimestamps, Base):
     example_output: Mapped[Optional[str]]
     data_range: Mapped[Optional[str]]
     plan_summary: Mapped[Optional[Any]] = mapped_column(JSONB)
+    # per-language editor starter code (language id -> template string), used
+    # e.g. for LeetCode-style core-code problems
+    starter_code: Mapped[Optional[Any]] = mapped_column(JSONB)
 
     release_time: Mapped[datetime]
     problem_type: Mapped[int] = mapped_column(server_default=text('0'))

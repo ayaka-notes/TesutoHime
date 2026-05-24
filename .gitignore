@@ -164,3 +164,8 @@ scripts/export_leetcode_*.py
 scripts/fix_leetcode_*.py
 scripts/localize_problem_images.py
 
+# clangd-wasm is ~120 MB — too large for git (and GitHub forks can't push
+# LFS objects). Fetched at image-build time by scripts/fetch-clangd.sh
+# from a GitHub Release; downloaded on demand for local dev.
+web/static/lib/clangd/*.wasm
+

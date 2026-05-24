@@ -14,14 +14,15 @@ from math import ceil
 from typing import Dict, Iterable, List, NoReturn, Optional
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 from uuid import uuid4
+from io import BytesIO
 from zipfile import ZipFile
 
 import requests
 import sqlalchemy as sa
 from flask import (Blueprint, Flask, abort, appcontext_pushed,
-                   before_render_template, current_app, g, make_response,
-                   redirect, render_template, request, send_file,
-                   send_from_directory, template_rendered, url_for)
+                   before_render_template, current_app, g, jsonify,
+                   make_response, redirect, render_template, request,
+                   send_file, send_from_directory, template_rendered, url_for)
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.routing import BaseConverter
@@ -37,9 +38,9 @@ from commons.models import (AccessToken, CompletionCriteriaType, Contest,
 from commons.task_typing import JudgePlanSummary, ProblemJudgeResult
 from commons.util import deserialize, format_exc, load_dataclass, serialize
 from web.api import api, api_get_user, token_is_valid
-from web.config import (JAccountConfig, JudgeConfig, NewsConfig,
-                        QuizTempDataConfig, S3Config, SchedulerConfig,
-                        WebConfig)
+from web.config import (CustomRunConfig, JAccountConfig, JudgeConfig,
+                        NewsConfig, ProblemConfig, QuizTempDataConfig,
+                        S3Config, SchedulerConfig, WebConfig)
 from web.const import (Privilege, ReturnCode, api_scopes,
                        completion_criteria_max_length, language_info,
                        max_pic_size, runner_status_info)
@@ -517,9 +518,17 @@ def problem_submit(problem: Problem):
     if request.method == 'GET':
         if problem.problem_type == 0:
             languages_accepted = ProblemManager.languages_accepted(problem)
-            return render_template('problem_submit.html',
-                                   problem=problem,
-                                   languages_accepted=languages_accepted)
+            resp = make_response(render_template('problem_submit.html',
+                                                 problem=problem,
+                                                 languages_accepted=languages_accepted))
+            # The in-browser clangd language server runs on WebAssembly threads,
+            # which require SharedArrayBuffer -> the document must be
+            # cross-origin isolated. 'credentialless' (rather than
+            # 'require-corp') still enables isolation but lets cross-origin
+            # images in problem statements load without a CORP header.
+            resp.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+            resp.headers['Cross-Origin-Embedder-Policy'] = 'credentialless'
+            return resp
         elif problem.problem_type == 1:
             quiz_json = QuizManager.get_json_from_data_service_by_id(QuizTempDataConfig, problem.id)
             problems = None
@@ -547,6 +556,88 @@ def problem_submit(problem: Problem):
             code=user_code,
         )
         return redirect(url_for('.submission', submission=submission), SEE_OTHER)
+
+
+def _fetch_core_code_files(problem_id: int):
+    '''If the problem ships an hpp-mode driver (core-code mode), return a dict
+    {filename: content} of the driver main.cpp plus its supplementary files.
+    Returns None for classic problems, where the user submits a whole program.'''
+    try:
+        obj = s3_internal.get_object(Bucket=S3Config.Buckets.problems,
+                                     Key=f'{problem_id}.zip')
+        zf = ZipFile(BytesIO(obj['Body'].read()))
+    except Exception:
+        return None
+    prefix = f'{problem_id}/'
+    names = set(zf.namelist())
+    if prefix + 'main.cpp' not in names:
+        return None
+    files = {}
+    try:
+        files['main.cpp'] = zf.read(prefix + 'main.cpp').decode('utf-8', 'replace')
+    except Exception:
+        return None
+    # bring along any declared supplementary files (extra headers, etc.)
+    try:
+        cfg = json.loads(zf.read(prefix + 'config.json').decode('utf-8', 'replace'))
+        for sf in cfg.get('SupportedFiles') or []:
+            if prefix + sf in names:
+                files[sf] = zf.read(prefix + sf).decode('utf-8', 'replace')
+    except Exception:
+        pass
+    return files
+
+
+@web.route('/problem/<problem:problem>/run', methods=['POST'])
+@require_logged_in
+def problem_custom_run(problem: Problem):
+    '''Ephemeral "self-test" run: compile & run code in the judger sandbox with
+    user-supplied stdin. Nothing is recorded - no submission, no judge record.
+    For core-code (hpp) problems the user's snippet is only a fragment, so the
+    problem's driver main.cpp and supplementary files are injected as well.'''
+    data = request.get_json(silent=True) or {}
+    language = data.get('language')
+    code = data.get('code') or ''
+    custom_input = data.get('input') or ''
+
+    if language not in ('cpp', 'python'):
+        return jsonify({'error': '自测运行暂不支持该语言。'}), BAD_REQUEST
+    if not code.strip():
+        return jsonify({'error': '代码为空。'}), BAD_REQUEST
+    if len(code) > ProblemConfig.Max_Code_Length:
+        return jsonify({'error': '代码超过长度上限。'}), BAD_REQUEST
+
+    payload = {'language': language, 'code': code, 'input': custom_input}
+    # core-code mode: compile the problem's driver with the user's snippet
+    # injected as src.hpp, mirroring the real hpp judge pipeline.
+    if language == 'cpp':
+        core_files = _fetch_core_code_files(problem.id)
+        if core_files is not None:
+            payload['extra_files'] = core_files
+            payload['code_filename'] = 'src.hpp'
+            payload['compile_target'] = 'main.cpp'
+
+    try:
+        res = requests.post(
+            urljoin(CustomRunConfig.base_url, 'run'),
+            json=payload,
+            timeout=90,
+        )
+        return jsonify(res.json()), res.status_code
+    except Exception as e:
+        logger.error('custom run request failed: %(error)s', {'error': e}, 'customrun:error')
+        return jsonify({'error': f'无法连接自测运行服务：{e}'}), 502
+
+
+@web.route('/clangd-log', methods=['POST'])
+@require_logged_in
+def clangd_log():
+    '''Diagnostic sink for the in-browser clangd worker: relays its boot stages
+    and errors to the server log so they can be inspected without the browser
+    developer console.'''
+    data = request.get_json(silent=True) or {}
+    current_app.logger.warning('[clangd-diag] %s', str(data.get('msg'))[:4000])
+    return jsonify({'ok': True})
 
 
 def check_scheduler_auth():

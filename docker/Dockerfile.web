@@ -3,8 +3,9 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # cffi / argon2-cffi may need a compiler if no wheel is available.
+# curl is also kept around so the build can fetch clangd-wasm (see below).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libffi-dev \
+    && apt-get install -y --no-install-recommends gcc libffi-dev curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY web/requirements.txt /app/web/requirements.txt
@@ -15,6 +16,11 @@ COPY web /app/web
 COPY alembic /app/alembic
 COPY alembic.ini /app/alembic.ini
 COPY scripts /app/scripts
+
+# clangd-wasm is ~120 MB and lives on a GitHub Release rather than in
+# the repo. Bake it into the image so the running container can serve
+# it as a static file without an additional volume mount.
+RUN sh /app/scripts/fetch-clangd.sh /app/web/static/lib/clangd/clangd.wasm
 
 # Docker-specific configuration (reads its values from environment variables).
 COPY docker/web.config.py /app/web/config.py

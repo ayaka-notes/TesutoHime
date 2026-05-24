@@ -1,0 +1,371 @@
+/* Full-screen LeetCode/牛客-style problem IDE — ACMOJ pink theme. */
+:root {
+    --pink:       #e77c8e;  /* ACMOJ primary */
+    --pink-dark:  #c94e6d;  /* primary hover */
+    --pink-soft:  #fbe9ec;  /* tinted background */
+    --ok:         #2dce89;  /* ACMOJ success */
+    --bad:        #f5365c;  /* ACMOJ danger */
+    --ink:        #172b4d;  /* heading text */
+    --body:       #525f7f;  /* body text */
+    --muted:      #8898aa;  /* muted text */
+    --line:       #e3e5ec;  /* borders */
+}
+* { box-sizing: border-box; }
+html, body {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+    background: #f4f5f7;
+    color: var(--body);
+}
+
+.ide { display: flex; flex-direction: column; height: 100vh; }
+
+/* ---- top bar (matches the site navbar) ---- */
+.ide__top {
+    flex: 0 0 50px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 18px;
+    background: var(--pink);
+    color: #fff;
+    box-shadow: 0 1px 6px rgba(0, 0, 0, .12);
+}
+.ide__back {
+    color: #fff;
+    text-decoration: none;
+    font-size: 14px;
+    white-space: nowrap;
+    opacity: .92;
+}
+.ide__back:hover { opacity: 1; text-decoration: underline; color: #fff; }
+.ide__title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ide__top-spacer { flex: 1; }
+.ide__hint { font-size: 12px; color: rgba(255, 255, 255, .8); }
+
+/* ---- body split ---- */
+.ide__body { flex: 1; display: flex; min-height: 0; }
+
+.ide__left {
+    width: 44%;
+    min-width: 240px;
+    overflow: auto;
+    background: #fff;
+}
+.ide__problem { padding: 22px 26px 60px; }
+.ide__problem h1 { font-size: 20px; margin: 0 0 14px; color: var(--ink); }
+.ide__problem h3 {
+    font-size: 15px;
+    margin: 22px 0 8px;
+    color: var(--ink);
+    border-left: 3px solid var(--pink);
+    padding-left: 8px;
+}
+.ide__problem h4 { font-size: 14px; margin: 14px 0 6px; color: var(--ink); }
+.ide__problem pre {
+    background: #f5f6f8;
+    border: 1px solid #e6e8ec;
+    border-radius: 6px;
+    padding: 10px 12px;
+    overflow: auto;
+    font-size: 13px;
+}
+.ide__problem code { font-family: "SF Mono", Consolas, Menlo, monospace; }
+/* copy buttons injected by render.js on every <pre> (pink, matching the site) */
+.ide pre .btn {
+    background: var(--pink);
+    border: 1px solid var(--pink);
+    color: #fff;
+    box-shadow: none !important;
+    border-radius: 0 6px 0 6px;
+    padding: 2px 10px;
+    font-size: 12px;
+    transition: background .1s;
+}
+/* focus alone (lingering after a click) stays base pink */
+.ide pre .btn:focus {
+    background: var(--pink);
+    border-color: var(--pink);
+    color: #fff;
+    outline: none;
+}
+/* darken only while hovering or actively pressing */
+.ide pre .btn:hover,
+.ide pre .btn:active,
+.ide pre .btn:not(:disabled):not(.disabled):active,
+.ide pre .btn:not(:disabled):not(.disabled):active:focus {
+    background: var(--pink-dark);
+    border-color: var(--pink-dark);
+    color: #fff;
+    outline: none;
+}
+.ide__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.ide__tag {
+    font-size: 12px;
+    background: var(--pink-soft);
+    color: var(--pink-dark);
+    border-radius: 10px;
+    padding: 2px 10px;
+}
+
+.ide__splitter {
+    flex: 0 0 5px;
+    cursor: col-resize;
+    background: var(--line);
+    position: relative;
+    transition: background .15s;
+}
+/* invisible wider hit area so the thin bar is still easy to grab */
+.ide__splitter::before {
+    content: "";
+    position: absolute;
+    top: 0; bottom: 0; left: -5px; right: -5px;
+    z-index: 6;
+}
+.ide__splitter:hover, .ide__splitter.dragging { background: var(--pink); }
+
+.ide__right {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 320px;
+}
+
+/* ---- editor toolbar ---- */
+.ide__toolbar {
+    flex: 0 0 46px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 14px;
+    background: #fff;
+    border-bottom: 1px solid var(--line);
+}
+.ide__toolbar select {
+    height: 30px;
+    border: 1px solid #d6d9e0;
+    border-radius: 6px;
+    padding: 0 8px;
+    font-size: 13px;
+    background: #fff;
+    color: var(--ink);
+    cursor: pointer;
+}
+.ide__toolbar select:focus { outline: none; border-color: var(--pink); }
+.ide__toolbar label { font-size: 13px; color: var(--body); margin: 0; cursor: pointer; }
+/* custom checkbox: pink box, white tick */
+.ide input[type="checkbox"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 15px;
+    height: 15px;
+    margin: 0 4px 0 0;
+    border: 1.5px solid #d0d3da;
+    border-radius: 3px;
+    background: #fff;
+    cursor: pointer;
+    position: relative;
+    vertical-align: -3px;
+}
+.ide input[type="checkbox"]:checked {
+    background: var(--pink);
+    border-color: var(--pink);
+}
+.ide input[type="checkbox"]:checked::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 1px;
+    width: 4px;
+    height: 8px;
+    border: solid #fff;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+.ide__toolbar-spacer { flex: 1; }
+.ide__icon-btn {
+    border: 1px solid #d6d9e0;
+    background: #fff;
+    border-radius: 6px;
+    height: 30px;
+    padding: 0 10px;
+    font-size: 13px;
+    color: var(--body);
+    cursor: pointer;
+}
+.ide__icon-btn:hover { border-color: var(--pink); color: var(--pink-dark); }
+
+/* clangd language-server status (dot + short label) */
+.ide__clangd-status {
+    font-size: 12px;
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+    cursor: default;
+}
+.ide__clangd-status::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex: 0 0 auto;
+}
+.ide__clangd-status--loading { color: var(--pink-dark); }
+.ide__clangd-status--loading::before {
+    background: var(--pink);
+    animation: ide-pulse 1s ease-in-out infinite;
+}
+.ide__clangd-status--ready { color: #1f9d57; }
+.ide__clangd-status--ready::before { background: var(--ok); }
+.ide__clangd-status--error { color: var(--bad); }
+.ide__clangd-status--error::before { background: var(--bad); }
+.ide__clangd-status--off::before { background: #c3c8d0; }
+@keyframes ide-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+.ide__editor { flex: 1; min-height: 0; }
+
+/* ---- console panel ---- */
+.ide__console {
+    flex: 0 0 240px;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border-top: 1px solid var(--line);
+}
+.ide__console-grip {
+    height: 5px;
+    cursor: row-resize;
+    background: var(--line);
+    position: relative;
+}
+.ide__console-grip::before {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; top: -5px; bottom: -5px;
+    z-index: 6;
+}
+.ide__console-grip:hover, .ide__console-grip.dragging { background: var(--pink); }
+.ide__tabs {
+    display: flex;
+    gap: 4px;
+    padding: 6px 12px 0;
+    border-bottom: 1px solid #eceef2;
+}
+.ide__tab {
+    font-size: 13px;
+    padding: 6px 12px;
+    border: none;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+}
+.ide__tab:hover { color: var(--pink-dark); }
+.ide__tab.active { color: var(--pink-dark); border-bottom-color: var(--pink); font-weight: 600; }
+.ide__panel { flex: 1; overflow: auto; padding: 10px 12px; display: none; }
+.ide__panel.active { display: block; }
+.ide__panel label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+.ide__io {
+    width: 100%;
+    min-height: 80px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: "SF Mono", Consolas, Menlo, monospace;
+    font-size: 13px;
+    resize: vertical;
+    color: var(--ink);
+}
+.ide__io:focus { outline: none; border-color: var(--pink); }
+.ide__output {
+    white-space: pre-wrap;
+    word-break: break-all;
+    background: #f5f6f8;
+    border: 1px solid #e6e8ec;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin: 0;
+    font-family: "SF Mono", Consolas, Menlo, monospace;
+    font-size: 13px;
+    min-height: 60px;
+    /* Long stdout shouldn't blow the IDE pane apart. Cap the
+     * visible height; user can scroll inside the <pre> to see more. */
+    max-height: 240px;
+    overflow: auto;
+    color: var(--ink);
+}
+.ide__result-meta { font-size: 12px; margin-bottom: 6px; }
+.ide__result-ok { color: var(--ok); font-weight: 600; }
+.ide__result-bad { color: var(--bad); font-weight: 600; }
+.ide__result-muted { color: var(--muted); }
+
+/* ---- actions ---- */
+.ide__actions {
+    flex: 0 0 54px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 0 14px;
+    border-top: 1px solid #eceef2;
+}
+.ide__btn {
+    height: 34px;
+    padding: 0 20px;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background .15s, border-color .15s;
+}
+.ide__btn:disabled { opacity: .55; cursor: not-allowed; }
+.ide__btn--ghost { background: #fff; color: var(--pink-dark); border-color: var(--pink); }
+.ide__btn--ghost:hover:not(:disabled) { background: var(--pink-soft); }
+.ide__btn--primary { background: var(--pink); color: #fff; }
+.ide__btn--primary:hover:not(:disabled) { background: var(--pink-dark); }
+.ide__spinner {
+    display: inline-block;
+    width: 13px; height: 13px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: ide-spin .6s linear infinite;
+    vertical-align: -2px;
+    margin-right: 5px;
+}
+@keyframes ide-spin { to { transform: rotate(360deg); } }
+
+.ide__problem .rendered { font-size: 14px; line-height: 1.7; color: var(--ink); }
+.ide__problem .rendered p { margin: 8px 0; }
+.ide__problem .rendered a { color: var(--pink-dark); }
+.ide__problem .rendered a:hover { color: var(--pink); }
+/* Constrain LeetCode-style figures (e.g. #42 Trapping Rain Water,
+ * #58 Intersection of Two Linked Lists) so they never overflow the
+ * left problem pane — width-locked, height-auto, centred with a
+ * little vertical breathing room. */
+.ide__problem .rendered img,
+.ide__problem img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 12px auto;
+    border-radius: 4px;
+}

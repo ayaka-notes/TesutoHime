@@ -1,59 +1,177 @@
-{% extends 'base.html' %}
+{%- from 'component/util.html' import render, render_styles, render_scripts -%}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ problem.id }}. {{ problem.title }} · ACMOJ</title>
+    <link rel="shortcut icon" href="{{ url_for('web.favicon') }}">
+    <link href="{{ url_for('.static', filename='lib/bootstrap.min.css') }}" rel="stylesheet">
+    {{ render_styles() }}
+    <link href="{{ url_for('.static', filename='css/problem_ide.css') }}?v={{ range(1, 999999999) | random }}" rel="stylesheet">
+</head>
+<body>
+<div class="ide">
+    <header class="ide__top">
+        <a class="ide__back" href="{{ url_for('web.problem', problem=problem) }}">&larr; 返回题目</a>
+        <span class="ide__title">{{ problem.id }}. {{ problem.title }}</span>
+        <span class="ide__top-spacer"></span>
+        <span class="ide__hint">代码自动暂存于本地</span>
+    </header>
 
-{% set page='提交' %}
+    <div class="ide__body" id="ide-body">
+        <!-- ===== left: problem statement ===== -->
+        <section class="ide__left" id="ide-left">
+            <div class="ide__problem">
+                <h1>{{ problem.id }}. {{ problem.title }}</h1>
+                <div class="ide__meta">
+                    {%- if problem.course is not none %}<span class="ide__tag">{{ problem.course.name }}</span>{% endif -%}
+                    {%- for lang in languages_accepted %}<span class="ide__tag">{{ g.consts.language_info[lang].name }}</span>{% endfor -%}
+                </div>
 
-{% block head %}
-    <link rel="stylesheet" href="{{ url_for('.static', filename = 'lib/bootstrap-select.min.css') }}">
-{% endblock %}
+                {%- if problem.description is not none %}
+                <h3>题目描述</h3>
+                <div>{{ render(problem.description) }}</div>
+                {%- endif %}
+                {%- if problem.input is not none %}
+                <h3>输入格式</h3>
+                <div>{{ render(problem.input) }}</div>
+                {%- endif %}
+                {%- if problem.output is not none %}
+                <h3>输出格式</h3>
+                <div>{{ render(problem.output) }}</div>
+                {%- endif %}
 
-{% block content %}
-    <div class="card card-body">
-        {%- from 'component/problem.html' import problem_title -%}
-        {{ problem_title(problem) }}
-        <hr>
-        {% if languages_accepted | length > 0 -%}
-        <form method="post" id="problem-submit-form">
-            {{ g.csrf() }}
-            {% if languages_accepted | length > 1 -%}
-            <div class="form-group">
-                <label for="language">语言</label>
-                <select id="language" name="language" class="form-control input-group py-0 selectpicker"
-                        data-style="form-control rounded border-grey shadow-none font-weight-normal">
-                    <option value="autodetect" selected>自动检测</option>
-                    {%- for language in languages_accepted -%}
-                    <option value="{{ language }}">{{ g.consts.language_info[language].name }}</option>
-                    {%- endfor -%}
-                </select>
-            </div>
-            {%- else -%}
-            <input type="hidden" id="language" name="language" value="{{ languages_accepted[0] }}">
-            {%- endif %}
-            <div class="row mx-0">
-                <label for="code">代码</label>
-                {% if not g.in_exam and problem.allow_public_submissions -%}
-                    <div class="form-group ml-auto">
-                        <div class="custom-control custom-switch">
-                            <input class="custom-control-input" type="checkbox" name="public" id="public"
-                                   value="public">
-                            <label class="custom-control-label" for="public">代码对他人可见</label>
-                        </div>
-                    </div>
+                {%- if problem.examples | length > 0 %}
+                <h3>样例</h3>
+                {%- for example in problem.examples %}
+                {%- if example['name'] is not none %}<h4>{{ example['name'] }}</h4>{% endif %}
+                {%- if example['input'] is not none %}
+                <p>输入</p><pre><code class="plaintext">{{ example['input'] }}</code></pre>
+                {%- endif %}
+                {%- if example['output'] is not none %}
+                <p>输出</p><pre><code class="plaintext">{{ example['output'] }}</code></pre>
+                {%- endif %}
+                {%- if example['description'] is not none %}<div>{{ render(example['description']) }}</div>{% endif %}
+                {%- endfor %}
+                {%- else %}
+                {%- if problem.example_input is not none %}
+                <h3>样例输入</h3>
+                <div>{{ render(problem.example_input) }}</div>
+                {%- endif %}
+                {%- if problem.example_output is not none %}
+                <h3>样例输出</h3>
+                <div>{{ render(problem.example_output) }}</div>
+                {%- endif %}
+                {%- endif %}
+
+                {%- if problem.data_range is not none %}
+                <h3>数据范围</h3>
+                <div>{{ render(problem.data_range) }}</div>
                 {%- endif %}
             </div>
-            <textarea class="form-control mb-3 text-monospace" rows="18" id="code" name="code" required="required"></textarea>
-            <input type="hidden" name="problem_id" value="{{ problem.id }}">
-            <noscript>
-                <input type="submit" class="btn btn-block btn-primary" value="提交评测">
-            </noscript>
-            <input type="submit" disabled id="submit-button" class="btn btn-block btn-primary" value="提交评测">
-        </form>
-        {%- else -%}
-        <p>此题目暂时无法评测。</p>
-        {%- endif -%}
-    </div>
-{% endblock %}
+        </section>
 
-{% block script %}
-    <script src="{{ url_for('.static', filename = 'lib/bootstrap-select.min.js') }}"></script>
-    <script src="{{ url_for('.static', filename = 'js/problem_submit.js') }}?v=20240902"></script>
-{% endblock %}
+        <div class="ide__splitter" id="ide-splitter"></div>
+
+        <!-- ===== right: editor + console ===== -->
+        <section class="ide__right">
+            {%- if languages_accepted | length > 0 %}
+            <div class="ide__toolbar">
+                <select id="ide-language">
+                    {%- for lang in languages_accepted %}
+                    <option value="{{ lang }}"{% if lang == 'cpp' %} selected{% endif %}>{{ g.consts.language_info[lang].name }}</option>
+                    {%- endfor %}
+                </select>
+                {%- if not g.in_exam and problem.allow_public_submissions %}
+                <label><input type="checkbox" id="ide-public"> 代码对他人可见</label>
+                {%- endif %}
+                <span class="ide__clangd-status" id="ide-clangd-status"></span>
+                <span class="ide__toolbar-spacer"></span>
+                <label for="ide-theme">主题</label>
+                <select id="ide-theme">
+                    <option value="acmoj-light">浅色</option>
+                    <option value="acmoj-dark">深色</option>
+                    <option value="acmoj-warm">暖调</option>
+                </select>
+                <button type="button" class="ide__icon-btn" id="ide-reset">重置代码</button>
+            </div>
+
+            <div class="ide__editor" id="ide-editor"></div>
+
+            <div class="ide__console" id="ide-console">
+                <div class="ide__console-grip" id="ide-console-grip"></div>
+                <div class="ide__tabs">
+                    <button class="ide__tab active" data-tab="testcase">自测输入</button>
+                    <button class="ide__tab" data-tab="result">运行结果</button>
+                </div>
+                <div class="ide__panel active" data-panel="testcase">
+                    <label>自定义输入</label>
+                    <textarea class="ide__io" id="ide-input" placeholder="在此输入自测数据……"></textarea>
+                </div>
+                <div class="ide__panel" data-panel="result">
+                    <div class="ide__result-meta" id="ide-result-meta">
+                        <span class="ide__result-muted">尚未运行。</span>
+                    </div>
+                    <label>程序输出（stdout）</label>
+                    <pre class="ide__output" id="ide-result-output"></pre>
+                </div>
+                <div class="ide__actions">
+                    <button type="button" class="ide__btn ide__btn--ghost" id="ide-run" disabled>运行</button>
+                    <button type="button" class="ide__btn ide__btn--primary" id="ide-submit" disabled>提交评测</button>
+                </div>
+            </div>
+            {%- else %}
+            <div class="ide__toolbar"><span class="ide__hint">此题目暂时无法评测。</span></div>
+            <div class="ide__editor"></div>
+            {%- endif %}
+        </section>
+    </div>
+</div>
+
+<!-- hidden form: reuses the existing submit endpoint -->
+<form id="ide-submit-form" method="post"
+      action="{{ url_for('web.problem_submit', problem=problem) }}" style="display:none">
+    {{ g.csrf() }}
+    <input type="hidden" name="language" value="cpp">
+    <input type="hidden" name="code" value="">
+    <input type="hidden" name="public" value="1" disabled>
+    <input type="hidden" name="problem_id" value="{{ problem.id }}">
+</form>
+
+<script src="{{ url_for('.static', filename='lib/jquery.min.js') }}"></script>
+<script src="{{ url_for('.static', filename='lib/purify.min.js') }}"></script>
+<script src="{{ url_for('.static', filename='lib/marked.min.js') }}"></script>
+<script src="{{ url_for('.static', filename='lib/katex.min.js') }}"></script>
+<script src="{{ url_for('.static', filename='lib/auto-render.min.js') }}"></script>
+<script src="{{ url_for('.static', filename='lib/highlight.min.js') }}"></script>
+<script src="{{ url_for('.static', filename='lib/clipboard.min.js') }}"></script>
+<script src="{{ url_for('.static', filename='js/render.js') }}?v=20250418"></script>
+<script>
+window.IDE_CONFIG = {
+    problemId: {{ problem.id }},
+    monacoVs: "{{ url_for('.static', filename='lib/monaco/vs') }}",
+    runUrl: "{{ url_for('web.problem_custom_run', problem=problem) }}",
+    clangdWorker: "{{ url_for('.static', filename='lib/clangd/clangd-worker.js') }}?v={{ range(1, 999999999) | random }}",
+    pyrightWorker: "{{ url_for('.static', filename='lib/pyright/pyright.worker.js') }}",
+    clangdLogUrl: "{{ url_for('web.clangd_log') }}",
+    starterCode: {{ (problem.starter_code or {}) | tojson }}
+};
+</script>
+<script src="{{ url_for('.static', filename='lib/monaco/vs/loader.js') }}"></script>
+<script src="{{ url_for('.static', filename='js/lsp-monaco.js') }}?v={{ range(1, 999999999) | random }}"></script>
+<script src="{{ url_for('.static', filename='js/problem_ide.js') }}?v={{ range(1, 999999999) | random }}"></script>
+<script>
+(function () {
+    var resetBtn = document.getElementById('ide-reset');
+    if (!resetBtn) return;
+    resetBtn.addEventListener('click', function () {
+        if (!confirm('确定要清空当前语言的代码并恢复初始模板吗？')) return;
+        var lang = document.getElementById('ide-language').value;
+        try { localStorage.removeItem('ide_code_' + window.IDE_CONFIG.problemId + '_' + lang); } catch (e) {}
+        location.reload();
+    });
+})();
+</script>
+</body>
+</html>
