@@ -13,6 +13,11 @@ services:
       POSTGRES_USER: oj
       POSTGRES_PASSWORD: oj_password
       POSTGRES_DB: oj
+      # Must match the web container's TZ — the schema stores naive
+      # datetimes, so a TZ mismatch reads back stamps that look hours
+      # stale and false-trips the proctor disconnect detector.
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
