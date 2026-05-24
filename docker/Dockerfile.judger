@@ -1,0 +1,79 @@
+# =============================================================================
+# Judger image (EXPERIMENTAL / HEAVY BUILD)
+# -----------------------------------------------------------------------------
+# The judger runs untrusted code inside an nsjail + Nix sandbox. Building it
+# requires the Nix package manager and compiles coreutils + nsjail from source,
+# so this image is large and slow to build. The container must run with
+# `privileged: true` because nsjail relies on Linux namespaces.
+#
+# Layer order is deliberate: the heavy sandbox/Nix build only depends on
+# judger2/sandbox + judger2/checker, so editing the judger Python sources
+# rebuilds only the cheap trailing layers.
+#
+#   Build & run:  docker compose --profile judger up -d --build
+# =============================================================================
+FROM debian:bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build/runtime dependencies as listed in docs/deployment/judger.md.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-venv \
+        git wget curl ca-certificates xz-utils \
+        pkg-config autoconf bison flex libtool \
+        libprotobuf-dev libnl-route-3-dev protobuf-compiler \
+        uidmap build-essential cmake jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged user that owns the Nix store and runs the sandbox. Both ojrunner
+# and root get a subuid/subgid range: nsjail uses the setuid helper newuidmap
+# for multi-entry uid maps, which checks /etc/subuid for the calling user.
+RUN useradd --create-home --shell /bin/bash ojrunner \
+    && printf 'ojrunner:100000:65536\nroot:100000:65536\n' >> /etc/subuid \
+    && printf 'ojrunner:100000:65536\nroot:100000:65536\n' >> /etc/subgid \
+    && mkdir -p /var/oj/runner /var/log/oj/runner /var/cache/oj/runner /app \
+    && chown -R ojrunner:ojrunner /var/oj/runner /var/log/oj/runner /var/cache/oj/runner /app \
+    && mkdir -m 0755 /nix && chown ojrunner:ojrunner /nix
+
+COPY judger2/requirements.txt /app/judger2/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /app/judger2/requirements.txt
+
+# ---- sandbox build inputs (rarely change) ----------------------------------
+COPY commons /app/commons
+COPY Makefile /app/Makefile
+COPY judger2/sandbox /app/judger2/sandbox
+COPY judger2/checker /app/judger2/checker
+RUN chown -R ojrunner:ojrunner /app
+
+# Install Nix as the unprivileged user (single-user mode; no daemon needed).
+USER ojrunner
+WORKDIR /app
+ENV USER=ojrunner HOME=/home/ojrunner
+RUN curl -L https://nixos.org/nix/install -o /tmp/nix-install.sh \
+    && sh /tmp/nix-install.sh --no-daemon \
+    && rm /tmp/nix-install.sh \
+    && mkdir -p /home/ojrunner/.config/nix \
+    && printf 'experimental-features = nix-command flakes\nsandbox = false\n' \
+        > /home/ojrunner/.config/nix/nix.conf
+ENV PATH=/home/ojrunner/.nix-profile/bin:$PATH
+
+# The stdenv flake references the checker via a relative path that escapes the
+# flake once copied into the Nix store; vendor it inside the flake instead.
+RUN cp -r /app/judger2/checker /app/judger2/sandbox/stdenv/checker-src \
+    && sed -i 's#\.\./\.\./checker#./checker-src#g' \
+        /app/judger2/sandbox/stdenv/nixpkgs.nix
+
+# Build the sandbox binaries (runner, du, nsjail) and the Nix judging
+# environments. This is the heavy step; see the header note above.
+RUN . /home/ojrunner/.nix-profile/etc/profile.d/nix.sh \
+    && make -C judger2/sandbox
+
+# ---- judger Python sources & config (change often -> cheap trailing layers) -
+USER root
+COPY judger2/*.py /app/judger2/
+COPY judger2/steps /app/judger2/steps
+COPY docker/runner.yml /app/runner.yml
+COPY docker/judger-entrypoint.sh /usr/local/bin/judger-entrypoint.sh
+RUN chmod +x /usr/local/bin/judger-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/judger-entrypoint.sh"]

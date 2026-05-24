@@ -1,0 +1,59 @@
+# Development overrides — explicitly opt-in.
+#
+# Usage (foreground watch):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Or set the default file list in your shell:
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml
+#
+# What this file does on top of the base compose:
+#   - Mounts ./web ./commons ./scripts ./alembic into the web container
+#     so the Flask dev server auto-reloads on edit.
+#   - Switches the web entrypoint to the dev server (templates auto-reload).
+#   - Spins up a second judger replica so you can watch the scheduler
+#     distribute work across a pool.
+
+services:
+  web:
+    # ``requirements.txt`` ships in the image but is regenerated as the
+    # codebase evolves; running pip install here on every dev boot keeps
+    # the container in sync without forcing a full image rebuild. (In
+    # prod the image is built fresh from requirements.txt so this step
+    # is unnecessary.)
+    entrypoint:
+      - sh
+      - -c
+      - 'pip install -q -r /app/web/requirements.txt && exec python -m web.main'
+    environment:
+      ENV: development
+    volumes:
+      - ./web:/app/web
+      - ./commons:/app/commons
+      - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+
+  # Second judger replica for dev so you can watch the scheduler
+  # distribute work across a pool. Uses the same image as the base
+  # ``judger`` service but overrides ``/app/runner.yml`` with a
+  # runner config that has ``id: 2``. Both judgers share the same
+  # group and Redis queue → scheduler treats them as interchangeable.
+  judger-2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.judger
+    privileged: true
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+      # Same DB env as the base judger so the entrypoint's auto-
+      # register step writes (id=2, name='judger-2') into judge_runner_v2.
+      DB: postgresql+psycopg2://oj:oj_password@postgres:5432/oj
+      RUNNER_NAME: judger-2
+    volumes:
+      - ./docker/runner.2.yml:/app/runner.yml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped

@@ -1,0 +1,25 @@
+.git
+**/__pycache__
+**/*.pyc
+*.egg-info
+.mypy_cache
+.pytest_cache
+venv
+.venv
+env
+ENV
+
+# Local, machine-specific configs - the images ship their own under docker/.
+web/config.py
+scheduler.yml
+runner.yml
+
+# Sandbox build artifacts (rebuilt inside the judger image).
+judger2/sandbox/.du-build
+judger2/sandbox/.nsjail-build
+judger2/sandbox/du
+judger2/sandbox/nsjail
+judger2/sandbox/runner
+judger2/sandbox/stdenv/profiles
+
+docs/_build

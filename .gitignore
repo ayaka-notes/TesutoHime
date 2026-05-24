@@ -11,6 +11,10 @@ scheduler.lock
 problem.yml
 runner.yml
 scheduler.yml
+# Templated/vendored configs under docker/ are checked in.
+!docker/runner.yml
+!docker/runner.2.yml
+!docker/scheduler.yml
 test.out
 
 # Byte-compiled / optimized / DLL files
@@ -151,3 +155,12 @@ dmypy.json
 
 # Vscode
 .vscode
+
+# Local-only LeetCode dataset import scripts. The standalone redistributable
+# dataset lives at ~/oj-leetcode-hot100-dataset/ (outside the repo); these
+# scripts were one-shot tools to seed a local dev DB.
+scripts/import_leetcode_*.py
+scripts/export_leetcode_*.py
+scripts/fix_leetcode_*.py
+scripts/localize_problem_images.py
+

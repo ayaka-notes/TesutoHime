@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# cffi / argon2-cffi may need a compiler if no wheel is available.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY web/requirements.txt /app/web/requirements.txt
+RUN pip install --no-cache-dir -r /app/web/requirements.txt gunicorn
+
+COPY commons /app/commons
+COPY web /app/web
+COPY alembic /app/alembic
+COPY alembic.ini /app/alembic.ini
+COPY scripts /app/scripts
+
+# Docker-specific configuration (reads its values from environment variables).
+COPY docker/web.config.py /app/web/config.py
+COPY docker/web-entrypoint.sh /usr/local/bin/web-entrypoint.sh
+RUN chmod +x /usr/local/bin/web-entrypoint.sh \
+    && mkdir -p /var/log/oj/web /var/cache/oj/web
+
+EXPOSE 5000
+
+ENTRYPOINT ["/usr/local/bin/web-entrypoint.sh"]

@@ -1,0 +1,27 @@
+scheduler_config: v2
+
+working_dir: /var/oj/scheduler
+cache_dir: /var/cache/oj/scheduler
+log_dir: /var/log/oj/scheduler
+host: 0.0.0.0
+port: 5100
+
+web:
+  base_url: http://web:5000/OnlineJudge/
+  auth: Bearer oj-internal-secret
+
+s3:
+  connection:
+    endpoint_url: http://minio:9000/
+    aws_access_key_id: minioadmin
+    aws_secret_access_key: minioadmin
+  buckets:
+    problems: oj-problems
+    artifacts: oj-artifacts
+
+redis:
+  prefix: 'task:'
+  connection:
+    host: redis
+    port: 6379
+    db: 1

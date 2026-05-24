@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY scheduler2/requirements.txt /app/scheduler2/requirements.txt
+RUN pip install --no-cache-dir -r /app/scheduler2/requirements.txt
+
+COPY commons /app/commons
+COPY scheduler2 /app/scheduler2
+
+# scheduler2.config loads scheduler.yml from the working directory.
+COPY docker/scheduler.yml /app/scheduler.yml
+
+RUN mkdir -p /var/oj/scheduler /var/log/oj/scheduler /var/cache/oj/scheduler
+
+EXPOSE 5100
+
+CMD ["python", "-m", "scheduler2.main"]

@@ -1,0 +1,24 @@
+runner_config: v3
+
+id: 1
+group: default
+relative_slowness: 1
+working_dir: /var/oj/runner
+cache_dir: /var/cache/oj/runner
+log_dir: /var/log/oj/runner
+worker_uid: 100001
+
+redis:
+  prefix: 'task:'
+  connection:
+    host: redis
+    port: 6379
+    db: 1
+
+git:
+  ssh:
+    # Placeholder key; replace if you need SSH-based git clone judging.
+    private_key: |
+      -----BEGIN OPENSSH PRIVATE KEY-----
+      placeholder
+      -----END OPENSSH PRIVATE KEY-----

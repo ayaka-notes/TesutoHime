@@ -1,0 +1,29 @@
+# Second-judger config — mounts over /app/runner.yml in the
+# ``judger-2`` dev service so the scheduler sees a pool of two
+# distinct runners (id=1, id=2) sharing the same group.
+runner_config: v3
+
+id: 2
+group: default
+relative_slowness: 1
+working_dir: /var/oj/runner
+cache_dir: /var/cache/oj/runner
+log_dir: /var/log/oj/runner
+# Bump the uid so the two judgers don't accidentally share sandbox
+# state if they're ever on the same host (in compose they're separate
+# containers, but it's cheap insurance).
+worker_uid: 100002
+
+redis:
+  prefix: 'task:'
+  connection:
+    host: redis
+    port: 6379
+    db: 1
+
+git:
+  ssh:
+    private_key: |
+      -----BEGIN OPENSSH PRIVATE KEY-----
+      placeholder
+      -----END OPENSSH PRIVATE KEY-----
