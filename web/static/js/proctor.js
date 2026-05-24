@@ -298,11 +298,21 @@
         t.addEventListener('ended', () => {
           const kind = t.kind === 'audio' ? 'mic_track_ended' : 'camera_track_ended';
           queueEvent(kind, 'warning');
-          // Auto-reacquire. If the device is permanently gone (eg.
-          // student unplugged the webcam), reconnectStreams will
-          // surface a violation event and the admin will see the
-          // session has no camera in the live dashboard.
-          reconnectStreams(false, true);
+          // Try once to silently re-get the camera; if it fails (e.g.
+          // student unplugged or revoked permission) bounce them back
+          // to the setup wizard so they can re-grant access without
+          // losing the session.
+          reconnectStreams(false, true).then(() => {
+            // reconnectStreams already emitted ``client_error`` on
+            // failure paths; check whether we actually got a track.
+            const hasTrack = cameraStream &&
+                cameraStream.getVideoTracks().some(x => x.readyState === 'live');
+            if (!hasTrack && CFG.require_camera) {
+              showOverlay('camera-stopped');
+            }
+          }).catch(() => {
+            if (CFG.require_camera) showOverlay('camera-stopped');
+          });
         });
       }
     }
@@ -346,6 +356,21 @@
   window.addEventListener('focus', () => {
     queueEvent('window_focus', 'info');
   });
+
+  // hasFocus() poll. macOS treats all Chrome windows as one app, so
+  // switching between two Chrome windows of the same app doesn't fire
+  // the window-level ``blur`` event — only switching to a different
+  // application does. Poll ``document.hasFocus()`` every 800 ms so
+  // window-to-window switches in the same browser still register.
+  let lastHadFocus = document.hasFocus();
+  setInterval(() => {
+    const now = document.hasFocus();
+    if (now !== lastHadFocus) {
+      if (!now) queueEvent('window_blur', 'violation');
+      else       queueEvent('window_focus', 'info');
+      lastHadFocus = now;
+    }
+  }, 800);
 
   // Informational key combos. We deliberately do NOT count these as
   // violations — Ctrl+S in particular is a no-op the student probably
@@ -449,6 +474,19 @@
         body: '你停止了屏幕共享。请点击按钮重新开始,否则录像记录将中断,本场比赛可能被判定违规。',
         button: '重新开始屏幕共享',
         action: async () => { el.style.display = 'none'; await rebootScreen(); },
+      };
+    } else if (reason === 'camera-stopped') {
+      cfg = {
+        icon: '📷',
+        title: '摄像头已断开',
+        body: '本场比赛要求摄像头持续可用。请重新接好摄像头/重新授权,然后回到监考设置页继续考试。',
+        button: '回到监考设置',
+        action: () => {
+          // The setup page picks up the still-active session and
+          // walks the student through re-granting permissions
+          // without invalidating their answers.
+          window.location.href = CONTEST_SETUP_URL || '/';
+        },
       };
     } else if (reason === 'over-limit') {
       const max = CFG.max_tab_switches;

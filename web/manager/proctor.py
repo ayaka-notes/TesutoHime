@@ -296,6 +296,19 @@ class ProctorManager:
         db.add(ev)
         db.flush()                       # populate ev.id for the response
 
+        # Counters used in admin overview. Tab-switch counts every loss of
+        # visibility / focus; violation_count tallies the harder violations.
+        # ``fullscreen_exit`` counts as a tab switch — leaving fullscreen
+        # is functionally indistinguishable from minimizing the window in
+        # terms of letting the student look at other things on screen.
+        # NOTE: increment BEFORE publishing so the SSE payload carries
+        # the post-increment value; otherwise the admin tile shows the
+        # pre-increment count and looks like the switch wasn't recorded.
+        if event_type in ('visibility_hidden', 'window_blur', 'fullscreen_exit'):
+            sess.tab_switch_count += 1
+        if severity == 'violation':
+            sess.violation_count += 1
+
         _publish(sess.contest_id, {
             'type': 'event',
             'session_id': sess.id,
@@ -308,15 +321,6 @@ class ProctorManager:
             'occurred_at': ev.occurred_at.isoformat() if ev.occurred_at else None,
             'detail': detail or {},
         })
-        # Counters used in admin overview. Tab-switch counts every loss of
-        # visibility / focus; violation_count tallies the harder violations.
-        # ``fullscreen_exit`` counts as a tab switch — leaving fullscreen
-        # is functionally indistinguishable from minimizing the window in
-        # terms of letting the student look at other things on screen.
-        if event_type in ('visibility_hidden', 'window_blur', 'fullscreen_exit'):
-            sess.tab_switch_count += 1
-        if severity == 'violation':
-            sess.violation_count += 1
         return ev
 
     @staticmethod
