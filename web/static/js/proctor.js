@@ -118,11 +118,23 @@
     }
   }
 
-  // Heartbeat every 30s also doubles as a flush.
-  setInterval(() => {
+  // Heartbeat every 30s also doubles as a flush. Chrome throttles
+  // setInterval in background tabs (cap ~1/min), so the recorder's
+  // ondataavailable callback below also kicks a heartbeat — that
+  // timer comes from the media subsystem which is NOT throttled.
+  let lastHeartbeatMs = 0;
+  function sendHeartbeat() {
+    lastHeartbeatMs = Date.now();
     queueEvent('heartbeat', 'info');
     flushEvents();
-  }, 30000);
+  }
+  setInterval(sendHeartbeat, 30000);
+  // Send one immediately on visibility change so the server has a
+  // fresh timestamp the moment the tab goes background; admin's
+  // stall detector then runs from there, not from a 30s-stale one.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) sendHeartbeat();
+  });
 
   // Best-effort flush on page unload.
   window.addEventListener('pagehide', () => {
@@ -245,7 +257,13 @@
         camMime ? { mimeType: camMime, videoBitsPerSecond: 250000,
                     audioBitsPerSecond: 32000 } : {});
       const up = makeUploader('camera');
-      rec.ondataavailable = (e) => up(e.data);
+      rec.ondataavailable = (e) => {
+        up(e.data);
+        // Piggy-back on the recorder's media-timer to ride past
+        // Chrome's background-tab setInterval throttle. Rate-limit
+        // to ~25 s so we still hit roughly one event per heartbeat.
+        if (Date.now() - lastHeartbeatMs > 25000) sendHeartbeat();
+      };
       rec.start(5000);                     // 5s chunks
       recorders.push(rec);
     }
@@ -257,7 +275,10 @@
       const rec = new MediaRecorder(screenStream,
         scrMime ? { mimeType: scrMime, videoBitsPerSecond: 2_000_000 } : {});
       const up = makeUploader('screen');
-      rec.ondataavailable = (e) => up(e.data);
+      rec.ondataavailable = (e) => {
+        up(e.data);
+        if (Date.now() - lastHeartbeatMs > 25000) sendHeartbeat();
+      };
       rec.start(5000);
       recorders.push(rec);
     }

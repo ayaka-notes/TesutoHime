@@ -703,12 +703,14 @@
         });
     }
 
-    // Disconnect detection: student-side heartbeat is every 30 s, so
-    // 45 s of silence means they've left the building (browser
-    // closed, machine slept, network died). Mark the card red and
-    // kill both video panels so the admin doesn't see a frozen
-    // preview from the last alive moment.
-    const STALL_MS = 45 * 1000;
+    // Disconnect detection: student-side heartbeat is every 30 s, but
+    // Chrome throttles setInterval in background tabs to ~1/min, so a
+    // 45 s threshold flags every backgrounded-but-alive tab as
+    // disconnected. The student's MediaRecorder ondataavailable also
+    // fires a heartbeat (media subsystem is not throttled), so 90 s
+    // catches genuinely dead tabs while letting failover heartbeats
+    // come through.
+    const STALL_MS = 90 * 1000;
     function tickStall() {
         const now = Date.now();
         if (!grid) return;
