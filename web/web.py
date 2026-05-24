@@ -3,6 +3,7 @@ import web.logging_ as logging_
 import json
 import os
 import re
+import secrets
 from datetime import datetime, timedelta
 from functools import wraps
 from http.client import (BAD_REQUEST, FORBIDDEN, FOUND, INTERNAL_SERVER_ERROR,
@@ -11,7 +12,7 @@ from http.client import (BAD_REQUEST, FORBIDDEN, FOUND, INTERNAL_SERVER_ERROR,
 from itertools import groupby
 from logging import getLogger
 from math import ceil
-from typing import Dict, Iterable, List, NoReturn, Optional
+from typing import Any, Dict, Iterable, List, NoReturn, Optional
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 from io import BytesIO
@@ -19,10 +20,11 @@ from zipfile import ZipFile
 
 import requests
 import sqlalchemy as sa
-from flask import (Blueprint, Flask, abort, appcontext_pushed,
+from flask import (Blueprint, Flask, Response, abort, appcontext_pushed,
                    before_render_template, current_app, g, jsonify,
                    make_response, redirect, render_template, request,
-                   send_file, send_from_directory, template_rendered, url_for)
+                   send_file, send_from_directory, stream_with_context,
+                   template_rendered, url_for)
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.routing import BaseConverter
@@ -31,6 +33,7 @@ import commons.task_typing
 import web.const as consts
 import web.utils as utils
 from commons.models import (AccessToken, CompletionCriteriaType, Contest,
+                            ContestProctorEvent, ContestProctorSession,
                             Course, CourseTag, Enrollment, Group,
                             JudgeRecordV2, JudgeStatus, Problem,
                             ProblemPrivilege, ProblemPrivilegeType,
@@ -39,8 +42,9 @@ from commons.task_typing import JudgePlanSummary, ProblemJudgeResult
 from commons.util import deserialize, format_exc, load_dataclass, serialize
 from web.api import api, api_get_user, token_is_valid
 from web.config import (CustomRunConfig, JAccountConfig, JudgeConfig,
-                        NewsConfig, ProblemConfig, QuizTempDataConfig,
-                        S3Config, SchedulerConfig, WebConfig)
+                        LiveKitConfig, NewsConfig, ProblemConfig,
+                        ProctorConfig, QuizTempDataConfig, S3Config,
+                        SchedulerConfig, WebConfig)
 from web.const import (Privilege, ReturnCode, api_scopes,
                        completion_criteria_max_length, language_info,
                        max_pic_size, runner_status_info)
@@ -54,6 +58,7 @@ from web.manager.news import NewsManager
 from web.manager.oauth import OauthManager, randtoken
 from web.manager.old_judge import OldJudgeManager
 from web.manager.problem import ProblemManager
+from web.manager.proctor import ProctorManager
 from web.manager.quiz import QuizManager
 from web.manager.realname import RealnameManager
 from web.manager.session import SessionManager, TempSessionManager
@@ -61,8 +66,8 @@ from web.manager.user import UserManager
 from web.utils import (SqlSession, abort_converter, db, gen_page,
                        gen_page_for_problem_list, generate_s3_public_url,
                        is_api_call, not_logged_in, paged_search_limitoffset,
-                       readable_lang_v1, readable_time, require_logged_in,
-                       s3_internal, sort_scopes)
+                       readable_lang_v1, readable_time, redis_connect,
+                       require_logged_in, s3_internal, sort_scopes)
 
 logger = getLogger(__name__)
 
@@ -155,6 +160,14 @@ def before_request():
     if 'db' not in g:
         setup_appcontext()
 
+    # Proctor injection is now done *per page* (only the contest
+    # dashboard and problem-submit pages get proctor.js), not
+    # globally. See _proctor_ctx_for() and the routes that call it.
+    # Browsing the problem list, help, profile, etc. never triggers
+    # the proctoring overlay — that was the user-facing surprise the
+    # global injection caused.
+    g.proctor_ctx = None
+
 @web.after_request
 def after_request(resp):
     if 'db' in g:
@@ -162,6 +175,18 @@ def after_request(resp):
             g.db.commit()
         except Exception as e:
             return errorhandler(e)
+    # The IDE page is cross-origin isolated (so the clangd wasm can use
+    # SharedArrayBuffer). A cross-origin-isolated document can only spawn a
+    # worker whose *script* is itself served with a COEP header — so tag every
+    # static asset. Without this, clangd-worker.js fails to load outright.
+    if '/static/' in request.path:
+        resp.headers['Cross-Origin-Embedder-Policy'] = 'credentialless'
+        resp.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
+        # The vendored language-server blobs (clangd 126MB wasm, pyright 17MB)
+        # never change in place — let the browser keep them permanently instead
+        # of re-validating on every refresh.
+        if '/lib/clangd/' in request.path or '/lib/pyright/' in request.path:
+            resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
     return resp
 
 
@@ -516,11 +541,19 @@ def problem_admin_form():
 @require_logged_in
 def problem_submit(problem: Problem):
     if request.method == 'GET':
+        # During a proctored contest the contest page embeds this
+        # view as an iframe (see contest.html) so the parent page's
+        # proctor.js stays alive. We deliberately do NOT inject
+        # proctor.js into the iframe — running it twice would
+        # double-publish events and try to acquire the camera a
+        # second time. The kiosk query param strips navbar/footer.
+        in_kiosk = request.args.get('kiosk') == '1'
         if problem.problem_type == 0:
             languages_accepted = ProblemManager.languages_accepted(problem)
             resp = make_response(render_template('problem_submit.html',
                                                  problem=problem,
-                                                 languages_accepted=languages_accepted))
+                                                 languages_accepted=languages_accepted,
+                                                 kiosk=in_kiosk))
             # The in-browser clangd language server runs on WebAssembly threads,
             # which require SharedArrayBuffer -> the document must be
             # cross-origin isolated. 'credentialless' (rather than
@@ -538,7 +571,7 @@ def problem_submit(problem: Problem):
                     i['answer'] = ''
 
             return render_template('quiz_submit.html', problem=problem,
-                                   problems=problems)
+                                   problems=problems, kiosk=in_kiosk)
     else:
         public = bool(request.form.get('public', 0))  # 0 or 1
         lang_str = str(request.form.get('language'))
@@ -1035,6 +1068,19 @@ def homework(contest_id):
 
 @web.route('/problemset/<contest:contest>')
 def problemset(contest: Contest):
+    # `embed=1` means the page is being rendered inside the setup
+    # page's iframe — the parent already owns the media streams and
+    # is doing the proctor.js work, so we suppress the gate and the
+    # in-page injection.
+    embedded = request.args.get('embed') == '1'
+    if not embedded:
+        if _proctor_locked_out(contest) is not None:
+            return redirect(url_for('.proctor_locked', contest=contest),
+                            SEE_OTHER)
+        reason = _proctor_setup_required(contest)
+        if reason is not None:
+            return redirect(url_for('.proctor_setup', contest=contest), SEE_OTHER)
+
     problems_visible = ContestManager.problems_visible(contest)
     data = ContestManager.get_board_view(contest)
     student_ids = set(x['student_id'] for x in data)
@@ -1050,7 +1096,13 @@ def problemset(contest: Contest):
     else:
         percentage = 0 if time_elapsed < 0 else 100
 
-    return render_template(
+    # Proctor.js is injected only on the contest page when accessed
+    # at the top level — when embedded as an iframe inside the setup
+    # page, the parent owns proctor.js so we suppress injection here.
+    g.proctor_ctx = None if embedded else _proctor_ctx_for(contest)
+    proctor_ctx = g.proctor_ctx  # template still reads the local var
+
+    resp = make_response(render_template(
         'contest.html',
         contest=contest,
         status=contest_status,
@@ -1060,7 +1112,21 @@ def problemset(contest: Contest):
         real_name_map=real_name_map,
         data=data,
         my_data=my_data,
-    )
+        proctor_ctx=proctor_ctx,
+        # Kiosk mode (no navbar/footer/off-contest links) applies
+        # both when proctor.js is running locally AND when we're
+        # rendered inside the setup-page iframe — in both cases the
+        # student should not be able to navigate away.
+        kiosk=bool(proctor_ctx and proctor_ctx.get('session_id')) or embedded,
+    ))
+    # COOP/COEP must propagate down the kiosk iframe chain
+    # (proctor_setup → contest?embed=1 → problem_submit) so the
+    # innermost problem_submit document is cross-origin isolated and
+    # can SharedArrayBuffer-host clangd. Missing this header at any
+    # level silently drops the inner page's isolation → "基础补全".
+    resp.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+    resp.headers['Cross-Origin-Embedder-Policy'] = 'credentialless'
+    return resp
 
 
 def export_problemset(contest: Contest):
@@ -1323,6 +1389,1019 @@ def problemset_quit(contest: Contest):
 def problemset_join(contest: Contest):
     ContestManager.join(contest)
     return redirect(url_for('.problemset', contest=contest), SEE_OTHER)
+
+
+# ============================================================
+# Proctoring — student-facing
+# ============================================================
+
+def _public_proctor_base_url() -> str:
+    """URL the browser must use to reach proctor2 for chunk uploads."""
+    return ProctorConfig.public_url.rstrip('/')
+
+
+def _proctor_locked_out(contest: Contest) -> Optional[ContestProctorSession]:
+    """Returns the closed session if the student has already finished
+    or been kicked from this contest. The student is locked out and
+    must see the "已结束" page instead of being able to re-enter."""
+    cfg = ProctorManager.config_for(contest)
+    if cfg is None or g.user is None or g.is_admin:
+        return None
+    return ProctorManager.get_finished_session(contest, g.user)
+
+
+def _proctor_setup_required(contest: Contest) -> Optional[str]:
+    """Return a reason string if a student top-level visit must
+    bounce through the setup page, else None.
+
+    We send the student to setup EVEN if an active session row
+    exists — the streams (MediaStream JS objects) cannot survive a
+    page navigation, so a refresh or a typed URL leaves the session
+    "alive" in the DB but recording-dead. The setup wizard
+    re-acquires camera + screen, which is the only honest fix.
+
+    Admins bypass entirely — they're inspecting the contest, not
+    sitting it.
+    """
+    cfg = ProctorManager.config_for(contest)
+    if cfg is None:
+        return None
+    if g.user is None:
+        return None
+    if g.is_admin:
+        return None
+    return 'setup-required'
+
+
+def _proctor_ctx_for(contest: Contest) -> Optional[dict]:
+    """Build the PROCTOR_BOOT dict for proctor.js on this contest's
+    pages (contest dashboard, problem submit, etc). Returns None if
+    the contest isn't proctored, the user is an admin, or there's no
+    user. The dict carries either a live session's URLs (rejoining
+    student) or templated URLs (fresh entry; proctor.js fills in the
+    session id after creating one)."""
+    cfg = ProctorManager.config_for(contest)
+    if cfg is None or g.user is None or g.is_admin:
+        return None
+    active = ProctorManager.get_active_session(contest, g.user)
+    base = {
+        'contest_id': contest.id,
+        'contest_name': contest.name,
+        'config': cfg,
+        'create_session_url': url_for('.proctor_create_session'),
+        'setup_url': url_for('.proctor_setup', contest=contest),
+        'proctor_url': _public_proctor_base_url(),
+    }
+    if active is not None:
+        base.update({
+            'session_id': active.id,
+            'tab_switch_count': active.tab_switch_count,
+            'violation_count': active.violation_count,
+            'events_url': url_for('.proctor_post_events', sid=active.id),
+            'end_url': url_for('.proctor_end_session', sid=active.id),
+            'signal_url': url_for('.proctor_signal_post_student',
+                                  sid=active.id),
+            'signal_stream_url': url_for('.proctor_signal_stream_student',
+                                         sid=active.id),
+            'snapshot_url': url_for('.proctor_post_snapshot', sid=active.id),
+        })
+    else:
+        # Fresh entry. proctor.js POSTs create_session_url first, gets
+        # back the SID, then templates these.
+        base.update({
+            'session_id': None,
+            'tab_switch_count': 0,
+            'violation_count': 0,
+            'events_url_template': '/OnlineJudge/api/proctor/sessions/{sid}/events',
+            'end_url_template': '/OnlineJudge/api/proctor/sessions/{sid}/end',
+            'signal_url_template': '/OnlineJudge/api/proctor/sessions/{sid}/signal',
+            'signal_stream_url_template': '/OnlineJudge/api/proctor/sessions/{sid}/signal/stream',
+            'snapshot_url_template': '/OnlineJudge/api/proctor/sessions/{sid}/snapshot',
+        })
+    return base
+
+
+@web.route('/api/proctor/time', methods=['GET'])
+def proctor_server_time():
+    """Authoritative wall-clock for the setup-page countdown. Returns
+    the server's naive datetime in the same convention contest times
+    are stored in (TZ=Asia/Shanghai per docker-compose). The client
+    polls this every 30 s to keep ``SERVER_SKEW_MS`` aligned, so a
+    student who edits their laptop clock can't shorten the wait.
+    """
+    return jsonify({
+        'server_now': g.time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'epoch_ms': int(g.time.timestamp() * 1000),
+    })
+
+
+@web.route('/contest/<contest:contest>/proctor/setup', methods=['GET'])
+@require_logged_in
+def proctor_setup(contest: Contest):
+    cfg = ProctorManager.config_for(contest)
+    if cfg is None:
+        abort(NOT_FOUND, '本场比赛未启用监考')
+    # Once-and-done: if the student already submitted (or was
+    # kicked), redirect to the locked-out page so they can't re-enter.
+    if not g.is_admin:
+        closed = ProctorManager.get_finished_session(contest, g.user)
+        if closed is not None:
+            return redirect(url_for('.proctor_locked',
+                                    contest=contest), SEE_OTHER)
+    sess = ProctorManager.get_active_session(contest, g.user)
+    # The setup page initiates getUserMedia / getDisplayMedia AND hosts
+    # the kiosk iframe that loads problem_submit.html — for that iframe
+    # to inherit cross-origin isolation (so the embedded clangd wasm
+    # gets SharedArrayBuffer), both the parent and the iframe must be
+    # COOP/COEP'd. Without the parent header here, the iframe's own
+    # COOP/COEP is silently ignored and clangd falls back to "基础补全".
+    resp = make_response(render_template(
+        'proctor_setup.html',
+        contest=contest,
+        proctor_config=cfg,
+        active_session_id=sess.id if sess else None,
+        proctor_public_url=_public_proctor_base_url(),
+        # Pass the server clock back as the baseline so the in-browser
+        # countdown corrects for client-side clock skew (a student with
+        # a 5-minute-fast clock would otherwise be allowed in 5 minutes
+        # before the contest actually starts).
+        server_now_iso=g.time.isoformat(),
+    ))
+    resp.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+    resp.headers['Cross-Origin-Embedder-Policy'] = 'credentialless'
+    return resp
+
+
+@web.route('/contest/<contest:contest>/proctor/locked', methods=['GET'])
+@require_logged_in
+def proctor_locked(contest: Contest):
+    """Landing page when the student has already finished (or was
+    kicked from) the contest. Hard-blocks re-entry."""
+    sess = ProctorManager.get_finished_session(contest, g.user) if g.user else None
+    return render_template('proctor_locked.html', contest=contest, session=sess)
+
+
+@web.route('/api/proctor/sessions', methods=['POST'])
+@require_logged_in
+def proctor_create_session():
+    data = request.get_json(silent=True) or {}
+    try:
+        contest_id = int(data.get('contest_id'))
+    except (TypeError, ValueError):
+        abort(BAD_REQUEST, 'contest_id 不合法')
+    contest = db.get(Contest, contest_id)
+    if contest is None:
+        abort(NOT_FOUND, '比赛不存在')
+    cfg = ProctorManager.config_for(contest)
+    if cfg is None:
+        abort(BAD_REQUEST, '本场比赛未启用监考')
+    if g.is_admin:
+        abort(FORBIDDEN, '管理员不能创建监考会话')
+
+    # Time window guard — the setup wizard's countdown already disables
+    # the button before start_time, but a hand-crafted POST mustn't get
+    # in either. Reconnecting to an already-active session still works
+    # (handled below), so this only blocks net-new entries.
+    if ProctorManager.get_active_session(contest, g.user) is None:
+        if g.time < contest.start_time:
+            abort(FORBIDDEN, '本场比赛尚未开始,无法进入')
+        if g.time > contest.end_time:
+            abort(FORBIDDEN, '本场比赛已结束,无法进入')
+
+    meta = data.get('client_meta') or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    # Filter to a small known set so we don't store giant blobs.
+    meta = {k: meta[k] for k in ('userAgent', 'screen', 'tz', 'lang', 'envcheck')
+            if k in meta}
+
+    # If the student already submitted, deny — score is locked.
+    if ProctorManager.get_finished_session(contest, g.user) is not None:
+        abort(FORBIDDEN, '本场比赛你已结束,无法重新进入。')
+
+    # Hard gate on the FIRST session creation: refuse if the
+    # pre-flight env check flagged a VM / remote-desktop / software-
+    # renderer environment. On reconnects (an active session already
+    # exists), we trust the prior verdict — proctor.js doesn't keep
+    # the envcheck result, and forcing the student to run the full
+    # check again every time the camera reseats would be brittle.
+    # Skipped entirely when the contest explicitly disabled
+    # ``require_envcheck`` (development/staging escape hatch).
+    is_reconnect = ProctorManager.get_active_session(contest, g.user) is not None
+    cfg = ProctorManager.config_for(contest) or {}
+    envcheck = meta.get('envcheck')
+    if not is_reconnect and cfg.get('require_envcheck', True):
+        if not isinstance(envcheck, dict) or 'blocked' not in envcheck:
+            abort(BAD_REQUEST, '环境检查数据缺失,无法进入考试')
+        if envcheck.get('blocked'):
+            labels = [r.get('label') for r in (envcheck.get('reasons') or [])
+                      if isinstance(r, dict)]
+            abort(FORBIDDEN, '本场考试禁止虚拟机/远程桌面:'
+                  + '; '.join(labels))
+
+    sess, token = ProctorManager.start_session(contest, g.user, meta)
+    if is_reconnect:
+        ProctorManager.log_event(sess, 'heartbeat', detail={'reconnect': True})
+    else:
+        ProctorManager.log_event(sess, 'session_start')
+        # Record the envcheck verdict as its own event so auditors
+        # can spot the rare 'clean' verdict with suspicious GPU
+        # details (eg. a hypervisor with GPU passthrough).
+        ProctorManager.log_event(sess, 'environment_info',
+                                 severity='info',
+                                 detail={'envcheck': envcheck})
+    return jsonify({
+        'session_id': sess.id,
+        'token': token,
+        'config': cfg,
+        'proctor_url': _public_proctor_base_url(),
+    })
+
+
+def _load_owned_session(sid: int) -> ContestProctorSession:
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None:
+        abort(NOT_FOUND, '监考会话不存在')
+    if sess.user_id != g.user.id and not g.is_admin:
+        abort(FORBIDDEN)
+    return sess
+
+
+@web.route('/api/proctor/sessions/<int:sid>/events', methods=['POST'])
+@require_logged_in
+def proctor_post_events(sid: int):
+    sess = _load_owned_session(sid)
+    if sess.status != 'active':
+        abort(BAD_REQUEST, '会话已结束')
+    payload = request.get_json(silent=True) or {}
+    events = payload.get('events')
+    if not isinstance(events, list) or not events:
+        abort(BAD_REQUEST, 'events 缺失')
+    if len(events) > 100:
+        abort(BAD_REQUEST, '一次最多 100 条')
+
+    # Per-session rate limit: ceiling of 120 events / minute. A real
+    # student barely emits 1/minute under normal use, so a request
+    # exceeding this is either a buggy client or a DoS attempt.
+    # Counter has a 60s TTL; we INCR by batch size, not request count,
+    # so a 100-event payload counts as 100.
+    try:
+        r = redis_connect()
+        rk = f'{RedisConfig.prefix}proctor:evt:{sid}:{int(datetime.now().timestamp())//60}'
+        cur = r.incrby(rk, len(events))
+        r.expire(rk, 90)
+        if cur > 120:
+            abort(429, '事件频率超限')
+    except Exception:
+        from logging import getLogger
+        getLogger(__name__).warning(
+            'event rate-limit failed open for sid=%s', sid, exc_info=True)
+    out = []
+    for raw in events:
+        if not isinstance(raw, dict):
+            continue
+        evt = ProctorManager.log_event(
+            sess,
+            event_type=str(raw.get('event_type', '')),
+            severity=str(raw.get('severity', 'info')),
+            detail=raw.get('detail') if isinstance(raw.get('detail'), dict) else None,
+        )
+        out.append(evt.id)
+    return jsonify({
+        'ok': True,
+        'event_ids': out,
+        'tab_switch_count': sess.tab_switch_count,
+        'violation_count': sess.violation_count,
+    })
+
+
+@web.route('/api/proctor/sessions/<int:sid>/livekit-token', methods=['POST'])
+@require_logged_in
+def proctor_livekit_token(sid: int):
+    """Issue a short-lived LiveKit JWT for the given session.
+
+    Students get a publisher token (canPublish=true, canSubscribe=
+    false). Admins get a subscriber-only token. Both are scoped to
+    the same room ``contest:<contest_id>`` so an admin viewing a
+    contest can see every student in it without needing one token
+    per session.
+
+    JWT structure follows the LiveKit spec — `iss` is the API key,
+    `sub` is the identity, `video` carries the grants. We sign with
+    HS256 using the shared API secret.
+    """
+    import jwt
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None:
+        abort(NOT_FOUND)
+    contest = db.get(Contest, sess.contest_id)
+    if contest is None:
+        abort(NOT_FOUND)
+
+    is_admin = g.is_admin or ContestManager.can_write(contest)
+    is_owner = g.user is not None and g.user.id == sess.user_id
+    if not (is_admin or is_owner):
+        abort(FORBIDDEN)
+
+    room = f'contest:{contest.id}'
+    if is_admin:
+        identity = f'admin:{g.user.id}'
+        name = g.user.friendly_name
+        grant = {
+            'roomJoin': True, 'room': room,
+            'canPublish': False, 'canSubscribe': True,
+            'canPublishData': False,
+        }
+    else:
+        # Publisher identity is the *session* id, not the user id,
+        # so admin can match each remote participant to a session row.
+        identity = f'session:{sess.id}'
+        name = (g.user.friendly_name + ' (#' + str(sess.id) + ')')
+        grant = {
+            'roomJoin': True, 'room': room,
+            'canPublish': True, 'canSubscribe': False,
+            'canPublishData': False,
+        }
+    now = int(datetime.now().timestamp())
+    payload = {
+        'iss': LiveKitConfig.api_key,
+        'sub': identity,
+        'nbf': now - 5,
+        'exp': now + 4 * 3600,   # 4-hour token; covers a long exam
+        'name': name,
+        'video': grant,
+    }
+    token = jwt.encode(payload, LiveKitConfig.api_secret, algorithm='HS256')
+    return jsonify({
+        'token': token,
+        'url': LiveKitConfig.url,
+        'room': room,
+        'identity': identity,
+    })
+
+
+@web.route('/problemset/<contest:contest>/admin/proctor/livekit-token', methods=['POST'])
+@require_logged_in
+def proctor_admin_livekit_token(contest: Contest):
+    """Admin-only token to subscribe to a contest's LiveKit room.
+
+    One room per contest holds every student-publisher in that exam;
+    the admin subscribes to the room and the SFU sends them every
+    student's tracks, with simulcast layers down-scaled for the
+    25-card thumbnail view.
+    """
+    import jwt
+    if not g.can_write:
+        abort(FORBIDDEN)
+    room = f'contest:{contest.id}'
+    identity = f'admin:{g.user.id}:{secrets.token_hex(3)}'
+    now = int(datetime.now().timestamp())
+    payload = {
+        'iss': LiveKitConfig.api_key,
+        'sub': identity,
+        'nbf': now - 5,
+        'exp': now + 4 * 3600,
+        'name': g.user.friendly_name,
+        'video': {
+            'roomJoin': True, 'room': room,
+            'canPublish': False, 'canSubscribe': True,
+            'canPublishData': False,
+        },
+    }
+    token = jwt.encode(payload, LiveKitConfig.api_secret, algorithm='HS256')
+    return jsonify({
+        'token': token, 'url': LiveKitConfig.url,
+        'room': room, 'identity': identity,
+    })
+
+
+@web.route('/api/proctor/sessions/<int:sid>/livesnap', methods=['POST'])
+@require_logged_in
+def proctor_post_livesnap(sid: int):
+    """High-frequency JPEG snapshot for the *live dashboard* — kept
+    in Redis only (TTL 30s), never persisted to MinIO. The student
+    pushes every ~3 s; admins poll with the matching GET.
+
+    This bypasses the partial-WebM seek hell: MediaRecorder's screen
+    encoding produces keyframes too rarely for ``seek to end``
+    decoding to land on the actually-current frame. A pre-encoded
+    JPEG always shows ``right now``.
+    """
+    if g.is_admin:
+        abort(FORBIDDEN, '管理员不应上传 livesnap')
+    sess = _load_owned_session(sid)
+    if sess.status != 'active':
+        abort(BAD_REQUEST, '会话已结束')
+    kind = request.args.get('kind', 'screen')
+    if kind not in ('screen', 'camera'):
+        abort(BAD_REQUEST, 'kind 不合法')
+    body = request.get_data(cache=False, as_text=False)
+    if len(body) > 512 * 1024:
+        abort(REQUEST_ENTITY_TOO_LARGE)
+    if not (len(body) >= 3 and body[0] == 0xFF and body[1] == 0xD8
+            and body[2] == 0xFF):
+        abort(BAD_REQUEST, '不是合法 JPEG')
+    try:
+        r = redis_connect()
+        r.set(f'{RedisConfig.prefix}proctor:livesnap:{sid}:{kind}',
+              body, ex=30)
+    except Exception:
+        abort(INTERNAL_SERVER_ERROR, '保存失败')
+    return jsonify({'ok': True, 'bytes': len(body)})
+
+
+@web.route('/api/proctor/sessions/<int:sid>/livesnap', methods=['GET'])
+@require_logged_in
+def proctor_get_livesnap(sid: int):
+    """Admin-only: return the latest live JPEG for the session/kind."""
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None:
+        abort(NOT_FOUND)
+    # @require_logged_in guarantees g.user is non-None — only the
+    # owner-or-admin check remains.
+    if not g.is_admin and sess.user_id != g.user.id:
+        abort(FORBIDDEN)
+    kind = request.args.get('kind', 'screen')
+    if kind not in ('screen', 'camera'):
+        abort(BAD_REQUEST, 'kind 不合法')
+    try:
+        body = redis_connect().get(
+            f'{RedisConfig.prefix}proctor:livesnap:{sid}:{kind}')
+    except Exception:
+        abort(INTERNAL_SERVER_ERROR)
+    if not body:
+        abort(NOT_FOUND, 'no live frame yet')
+    if isinstance(body, str):
+        body = body.encode('latin-1')
+    resp = make_response(body)
+    resp.headers['Content-Type'] = 'image/jpeg'
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@web.route('/api/proctor/sessions/<int:sid>/snapshot', methods=['POST'])
+@require_logged_in
+def proctor_post_snapshot(sid: int):
+    """Periodic JPEG snapshot from the student's screen / camera.
+
+    These are stored in oj-proctoring/<sid>/snapshots/ as raw bytes;
+    admins can browse them on the session detail page. Each upload is
+    capped at 1 MiB so a misbehaving client can't fill storage. The
+    student does NOT pass a JSON wrapper — the body is the raw JPEG
+    bytes; we read it as bytes and write to S3 verbatim.
+    """
+    # Admin uploads to this endpoint make no sense and almost certainly
+    # indicate a bug or an attempt to plant fake evidence on someone
+    # else's session — refuse them up-front.
+    if g.is_admin:
+        abort(FORBIDDEN, '管理员不应该上传快照')
+    sess = _load_owned_session(sid)
+    if sess.status != 'active':
+        abort(BAD_REQUEST, '会话已结束')
+    kind = request.args.get('kind', 'screen')
+    if kind not in ('screen', 'camera'):
+        abort(BAD_REQUEST, 'kind 不合法')
+    body = request.get_data(cache=False, as_text=False)
+    if not body:
+        abort(BAD_REQUEST, '空载荷')
+    if len(body) > 1024 * 1024:
+        abort(REQUEST_ENTITY_TOO_LARGE)
+    # Validate JPEG SOI marker. We accept (and only accept) JPEG so
+    # admins reviewing the gallery can't be tricked into a polyglot
+    # file (e.g. HTML masquerading as image/jpeg).
+    if not (len(body) >= 3 and body[0] == 0xFF and body[1] == 0xD8
+            and body[2] == 0xFF):
+        abort(BAD_REQUEST, '快照不是合法的 JPEG')
+
+    # Per-session rate limit + count cap, both keyed in Redis. We use
+    # an INCR-with-TTL pattern: one counter per (sid, kind, 15-second
+    # bucket) gates the rate; one persistent counter per (sid, kind)
+    # gates the total over the whole session.
+    r = redis_connect()
+    bucket = int(datetime.now().timestamp()) // 15
+    rate_key = f'{RedisConfig.prefix}proctor:snap:rate:{sid}:{kind}:{bucket}'
+    count_key = f'{RedisConfig.prefix}proctor:snap:count:{sid}:{kind}'
+    try:
+        rate = r.incr(rate_key)
+        r.expire(rate_key, 30)
+        if rate > 1:
+            abort(429, '快照过于频繁,请 15 秒后再试')
+        total = r.incr(count_key)
+        # Snapshots live for the duration of the session. 8h covers any
+        # reasonable exam length; finalize doesn't delete the counter
+        # which is fine — it auto-expires.
+        r.expire(count_key, 8 * 3600)
+        if total > 500:
+            abort(429, '本场快照已达上限')
+    except Exception:
+        # Redis down: degrade gracefully — accept the snapshot rather
+        # than break recording, but log loudly.
+        from logging import getLogger
+        getLogger(__name__).warning(
+            'snapshot rate-limit failed open for sid=%s', sid, exc_info=True)
+
+    ts = int(datetime.now().timestamp() * 1000)
+    key = f'{sid}/snapshots/{kind}-{ts}.jpg'
+    try:
+        s3_internal.put_object(
+            Bucket=S3Config.Buckets.proctoring,
+            Key=key,
+            Body=body,
+            ContentType='image/jpeg',
+        )
+    except Exception as e:
+        abort(INTERNAL_SERVER_ERROR, f'快照上传失败: {e}')
+    return jsonify({'ok': True, 'key': key, 'bytes': len(body)})
+
+
+@web.route('/api/proctor/sessions/<int:sid>/end', methods=['POST'])
+@require_logged_in
+def proctor_end_session(sid: int):
+    sess = _load_owned_session(sid)
+    if sess.status == 'active':
+        ProctorManager.log_event(sess, 'session_end')
+        ProctorManager.end_session(sess, status='ended')
+    return jsonify({'ok': True, 'status': sess.status})
+
+
+# ============================================================
+# Proctoring — admin
+# ============================================================
+
+@web.route('/problemset/<contest:contest>/admin/proctor', methods=['POST'])
+def proctor_admin_save(contest: Contest):
+    if not g.can_write:
+        abort(FORBIDDEN)
+    form = request.form
+    if form.get('action') == 'disable':
+        contest.proctor_config = None
+        ContestManager.flush_cache(contest)
+        _audit('config_disabled', contest_id=contest.id)
+        return redirect(url_for('.problemset_admin', contest=contest), SEE_OTHER)
+    cfg = {
+        'require_camera': form.get('require_camera') == 'on',
+        'require_mic': form.get('require_mic') == 'on',
+        'require_screen': form.get('require_screen') == 'on',
+        'record_camera': form.get('record_camera') == 'on',
+        'record_screen': form.get('record_screen') == 'on',
+        'fullscreen_required': form.get('fullscreen_required') == 'on',
+        'require_envcheck': form.get('require_envcheck') == 'on',
+    }
+    raw_max = form.get('max_tab_switches', '').strip()
+    if raw_max == '':
+        cfg['max_tab_switches'] = None
+    else:
+        try:
+            cfg['max_tab_switches'] = max(0, int(raw_max))
+        except ValueError:
+            abort(BAD_REQUEST, '切屏次数上限必须为整数')
+    contest.proctor_config = cfg
+    ContestManager.flush_cache(contest)
+    _audit('config_saved', contest_id=contest.id, cfg=cfg)
+    return redirect(url_for('.problemset_admin', contest=contest), SEE_OTHER)
+
+
+def _signal_channel(session_id: int) -> str:
+    """Redis pub/sub channel for WebRTC signaling on one session."""
+    return f'web:proctor:signal:{session_id}'
+
+
+# Dedicated audit logger. A separate logger lets ops route this to a
+# tamper-evident log sink (e.g. an append-only file or a SIEM) instead
+# of mixing it with the noisy werkzeug access log. Each line is one
+# admin-initiated proctoring action.
+_audit_logger = getLogger('proctor.audit')
+
+
+def _audit(action: str, **extra: Any) -> None:
+    """Record one admin action against proctoring data."""
+    fields = {
+        'action': action,
+        'actor_id': getattr(g, 'user', None) and g.user.id,
+        'actor_username': getattr(g, 'user', None) and g.user.username,
+        'remote_addr': request.remote_addr,
+        'user_agent': request.headers.get('User-Agent', '')[:200],
+    }
+    fields.update(extra)
+    _audit_logger.info('proctor_audit %s', json.dumps(fields, default=str),
+                       extra={'audit': True})
+
+
+# Whitelists for messages that get re-broadcast on SSE. Any redis
+# pub/sub payload that doesn't match one of these schemas is silently
+# dropped: this is a *defense in depth* layer against future code (or
+# a compromised redis) accidentally publishing sensitive content on
+# a channel that browsers subscribe to.
+_LIVE_EVENT_FIELDS = {
+    'type', 'session_id', 'user_id', 'user_name', 'user_login',
+    'event_id', 'event_type',
+    'severity', 'tab_switch_count', 'violation_count', 'occurred_at',
+    'detail', 'status',
+}
+_SIGNAL_KINDS = {
+    'request_view', 'ready_to_negotiate', 'sdp', 'ice', 'end_view',
+    'tracks_info',
+}
+
+
+def _validate_live(msg: dict) -> Optional[dict]:
+    t = msg.get('type')
+    if t not in ('event', 'session_status'):
+        return None
+    return {k: msg[k] for k in msg.keys() if k in _LIVE_EVENT_FIELDS}
+
+
+def _validate_signal(msg: dict) -> Optional[dict]:
+    if msg.get('from') not in ('student', 'admin'):
+        return None
+    data = msg.get('data')
+    if not isinstance(data, dict):
+        return None
+    if data.get('kind') not in _SIGNAL_KINDS:
+        return None
+    return {'from': msg['from'], 'data': data}
+
+
+def _sse_stream(channel: str, validator):
+    """Generic SSE stream from a Redis pub/sub channel.
+
+    Every message is parsed → run through ``validator`` → re-serialized.
+    A ping comment goes out every ~15s so intermediaries don't
+    idle-close the long-lived connection.
+
+    IMPORTANT: SSE is a long-lived response (often hours). We
+    explicitly close the per-request DB session before entering the
+    pubsub loop — otherwise each open dashboard occupies one
+    connection in the SQLAlchemy pool for as long as the browser
+    stays connected, and a handful of admin tabs exhausts the pool
+    and 500s the rest of the site.
+    """
+    # Drain the per-request DB session before we go into the long
+    # loop. `g.pop('db')` removes it from the request context so
+    # @after_request won't try to commit on a connection we just
+    # returned to the pool.
+    sess = g.pop('db', None)
+    if sess is not None:
+        try: sess.commit()
+        except Exception: pass
+        try: sess.close()
+        except Exception: pass
+    yield ': hello\n\n'
+    pubsub = redis_connect().pubsub()
+    last_ping = datetime.now()
+    try:
+        pubsub.subscribe(channel)
+        while True:
+            msg = pubsub.get_message(timeout=15.0,
+                                     ignore_subscribe_messages=True)
+            if msg is not None and msg.get('type') == 'message':
+                try:
+                    parsed = json.loads(msg['data'])
+                    if isinstance(parsed, dict):
+                        clean = validator(parsed)
+                        if clean is not None:
+                            yield f'data: {json.dumps(clean, default=str)}\n\n'
+                except (ValueError, TypeError):
+                    pass
+            if (datetime.now() - last_ping).total_seconds() >= 15:
+                yield ': ping\n\n'
+                last_ping = datetime.now()
+    finally:
+        try:
+            pubsub.unsubscribe(channel)
+            pubsub.close()
+        except Exception:
+            pass
+
+
+def _signal_relay(session_id: int, role: str) -> None:
+    """Publish a JSON signaling message coming from one peer to the
+    other. The body is forwarded verbatim with `from` stamped on so
+    receivers can ignore their own echoes."""
+    data = request.get_json(silent=True) or {}
+    msg = {'from': role, 'data': data}
+    try:
+        redis_connect().publish(_signal_channel(session_id),
+                                json.dumps(msg))
+    except Exception:
+        abort(INTERNAL_SERVER_ERROR, '信令转发失败')
+
+
+@web.route('/api/proctor/sessions/<int:sid>/signal/stream')
+@require_logged_in
+def proctor_signal_stream_student(sid: int):
+    """Student-side SSE for WebRTC signaling.
+
+    Authenticated by the per-session token (the same token used for
+    chunk uploads to proctor2). The token is passed as ?token=... so
+    EventSource — which can't set headers — still works.
+    """
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None or sess.status != 'active':
+        abort(NOT_FOUND, '会话不存在或已结束')
+    # The browser stores the chunk-upload token in sessionStorage and
+    # passes it here. We don't persist it server-side, so we instead
+    # require the request to originate from the session's owner.
+    if g.user is None or g.user.id != sess.user_id:
+        abort(FORBIDDEN)
+    resp = Response(stream_with_context(_sse_stream(_signal_channel(sid), _validate_signal)),
+                    mimetype='text/event-stream')
+    resp.headers['Cache-Control'] = 'no-cache'
+    resp.headers['X-Accel-Buffering'] = 'no'
+    return resp
+
+
+@web.route('/api/proctor/sessions/<int:sid>/signal', methods=['POST'])
+@require_logged_in
+def proctor_signal_post_student(sid: int):
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None or sess.status != 'active':
+        abort(NOT_FOUND)
+    if g.user is None or g.user.id != sess.user_id:
+        abort(FORBIDDEN)
+    _signal_relay(sid, 'student')
+    return jsonify({'ok': True})
+
+
+@web.route('/api/proctor/admin/sessions/<int:sid>/signal/stream')
+@require_logged_in
+def proctor_signal_stream_admin(sid: int):
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None or sess.status != 'active':
+        abort(NOT_FOUND)
+    contest = db.get(Contest, sess.contest_id)
+    if contest is None or not ContestManager.can_write(contest):
+        abort(FORBIDDEN)
+    resp = Response(stream_with_context(_sse_stream(_signal_channel(sid), _validate_signal)),
+                    mimetype='text/event-stream')
+    resp.headers['Cache-Control'] = 'no-cache'
+    resp.headers['X-Accel-Buffering'] = 'no'
+    return resp
+
+
+@web.route('/api/proctor/admin/sessions/<int:sid>/signal', methods=['POST'])
+@require_logged_in
+def proctor_signal_post_admin(sid: int):
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None or sess.status != 'active':
+        abort(NOT_FOUND)
+    contest = db.get(Contest, sess.contest_id)
+    if contest is None or not ContestManager.can_write(contest):
+        abort(FORBIDDEN)
+    # Audit the first message of each viewing session — a request_view
+    # is the signal that an admin started live-watching this student.
+    try:
+        payload = request.get_json(silent=True) or {}
+        if payload.get('kind') == 'request_view':
+            _audit('webrtc_view_started',
+                   session_id=sid, target_user_id=sess.user_id)
+    except Exception:
+        pass
+    _signal_relay(sid, 'admin')
+    return jsonify({'ok': True})
+
+
+@web.route('/problemset/<contest:contest>/admin/proctor/live')
+def proctor_admin_live(contest: Contest):
+    """Real-time patrol dashboard for a contest."""
+    if not g.can_write:
+        abort(FORBIDDEN)
+    _audit('dashboard_open', contest_id=contest.id)
+    sessions = [s for s in ProctorManager.sessions_for_contest(contest)
+                if s.status == 'active']
+    user_by_id = {}
+    last_event_at = {}
+    if sessions:
+        user_by_id = {u.id: u for u in db.scalars(
+            sa.select(User).where(User.id.in_({s.user_id for s in sessions}))
+        ).all()}
+        # Latest event per session — the dashboard turns this into a
+        # "stalled" badge if no event has arrived in >2 minutes,
+        # giving the proctor a quick visual on which student tabs
+        # have crashed / lost network.
+        latest = db.execute(
+            sa.select(ContestProctorEvent.session_id,
+                      sa.func.max(ContestProctorEvent.occurred_at))
+            .where(ContestProctorEvent.session_id.in_({s.id for s in sessions}))
+            .group_by(ContestProctorEvent.session_id)
+        ).all()
+        last_event_at = {sid: ts.isoformat() if ts else None
+                         for sid, ts in latest}
+    return render_template('proctor_admin_live.html',
+                           contest=contest, sessions=sessions,
+                           user_by_id=user_by_id,
+                           last_event_at=last_event_at)
+
+
+@web.route('/problemset/<contest:contest>/admin/proctor/live/stream')
+def proctor_admin_live_stream(contest: Contest):
+    """SSE channel pushed from Redis pub/sub.
+
+    Each message is a JSON blob published by ProctorManager when a
+    session changes state or an event is logged. The dev Werkzeug
+    server is threaded, so the long-lived generator co-exists with
+    the rest of the app; in production this route must be served by
+    gevent or a sidecar — but the route stays the same.
+    """
+    if not g.can_write:
+        abort(FORBIDDEN)
+    from web.manager.proctor import _live_channel
+    channel = _live_channel(contest.id)
+    resp = Response(
+        stream_with_context(_sse_stream(channel, _validate_live)),
+        mimetype='text/event-stream',
+    )
+    resp.headers['Cache-Control'] = 'no-cache'
+    resp.headers['X-Accel-Buffering'] = 'no'                 # bypass nginx
+    resp.headers['Connection'] = 'keep-alive'
+    return resp
+
+
+@web.route('/problemset/<contest:contest>/admin/proctor/sessions/<int:sid>/preview/<kind>')
+def proctor_admin_session_preview(contest: Contest, sid: int, kind: str):
+    """Proxy the still-growing spool file from proctor2 to the admin.
+
+    The admin's <video> element opens this URL; we proxy chunks through
+    so the existing session cookie remains the only auth artefact.
+    For finished sessions the recording is already in MinIO — those use
+    the regular ``proctor_admin_session_detail`` presigned URL flow.
+    """
+    if not g.can_write:
+        abort(FORBIDDEN)
+    if kind not in ('camera', 'screen'):
+        abort(NOT_FOUND)
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None or sess.contest_id != contest.id:
+        abort(NOT_FOUND)
+    if sess.status != 'active':
+        abort(BAD_REQUEST, '会话已结束,请在详情页查看完整录像')
+    # Only audit the *first* preview hit in a 60-second window — the
+    # dashboard polls one URL per card every 8s, so without this we'd
+    # spam the audit log.
+    try:
+        r = redis_connect()
+        ak = f'web:proctor:audit:preview:{g.user.id}:{sid}:{kind}'
+        if r.set(ak, '1', ex=60, nx=True):
+            _audit('preview_started',
+                   session_id=sid, target_user_id=sess.user_id, kind=kind)
+    except Exception:
+        pass
+    # Range support: forward the client header so Chrome's <video>
+    # element can seek into the partial file.
+    fwd_headers = {'Authorization': ProctorConfig.internal_auth}
+    if 'Range' in request.headers:
+        fwd_headers['Range'] = request.headers['Range']
+    upstream = requests.get(
+        f'{ProctorConfig.base_url.rstrip("/")}/internal/preview/{sid}/{kind}',
+        headers=fwd_headers, stream=True, timeout=10)
+    resp = Response(upstream.iter_content(chunk_size=64 * 1024),
+                    status=upstream.status_code,
+                    mimetype='video/webm')
+    for h in ('Content-Length', 'Content-Range', 'Accept-Ranges'):
+        if h in upstream.headers:
+            resp.headers[h] = upstream.headers[h]
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@web.route('/problemset/<contest:contest>/admin/proctor/sessions')
+def proctor_admin_sessions(contest: Contest):
+    if not g.can_write:
+        abort(FORBIDDEN)
+    sessions = ProctorManager.sessions_for_contest(contest)
+    user_by_id = {u.id: u for u in db.scalars(
+        sa.select(User).where(User.id.in_({s.user_id for s in sessions}))
+    ).all()} if sessions else {}
+    return render_template('proctor_admin_sessions.html',
+                           contest=contest, sessions=sessions,
+                           user_by_id=user_by_id)
+
+
+@web.route('/problemset/<contest:contest>/admin/proctor/sessions/<int:sid>/reopen',
+           methods=['POST'])
+def proctor_admin_session_reopen(contest: Contest, sid: int):
+    """Lift the once-and-done lockout for a student who accidentally
+    submitted (or was wrongly aborted). Revives the same session row;
+    the student can refresh / re-enter and pick up where they left off.
+    """
+    if not g.can_write:
+        abort(FORBIDDEN)
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None or sess.contest_id != contest.id:
+        abort(NOT_FOUND)
+    prev_status = sess.status
+    ProctorManager.reopen_session(sess)
+    _audit('session_reopen', session_id=sid, target_user_id=sess.user_id,
+           prev_status=prev_status)
+    return redirect(url_for('.proctor_admin_sessions', contest=contest), SEE_OTHER)
+
+
+@web.route('/problemset/<contest:contest>/admin/proctor/sessions/<int:sid>')
+def proctor_admin_session_detail(contest: Contest, sid: int):
+    if not g.can_write:
+        abort(FORBIDDEN)
+    sess = db.get(ContestProctorSession, sid)
+    if sess is None or sess.contest_id != contest.id:
+        abort(NOT_FOUND)
+    _audit('session_detail_view',
+           session_id=sid, target_user_id=sess.user_id)
+    events = ProctorManager.list_events(sess)
+    user = db.get(User, sess.user_id)
+    # Recordings are stored as one object per (kind, segment) under
+    # the prefix in screen_object_key / camera_object_key. Each
+    # segment is a self-contained WebM produced by a single
+    # MediaRecorder run (a reconnect produces a new segment); rather
+    # than try to concat them server-side and risk a corrupt file,
+    # admin detail surfaces every segment as its own <video> so the
+    # reviewer can play them in order without seek hazards.
+    video_segments = {'screen': [], 'camera': []}
+    if sess.status == 'ended':
+        for kind, prefix in (('screen', sess.screen_object_key),
+                             ('camera', sess.camera_object_key)):
+            if not prefix:
+                continue
+            # Backward compat: an old session row might still hold a
+            # single ".webm" filename instead of a prefix. Fall back to
+            # the legacy single-file URL.
+            if not prefix.endswith('/'):
+                try:
+                    video_segments[kind].append({
+                        'url': generate_s3_public_url(
+                            'get_object',
+                            {'Bucket': S3Config.Buckets.proctoring,
+                             'Key': prefix},
+                            ExpiresIn=3600),
+                        'segment': 0, 'bytes': None,
+                    })
+                except Exception:
+                    pass
+                continue
+            try:
+                listing = s3_internal.list_objects_v2(
+                    Bucket=S3Config.Buckets.proctoring, Prefix=prefix)
+                for obj in listing.get('Contents', []):
+                    key = obj['Key']
+                    base = key.rsplit('/', 1)[-1]
+                    try:
+                        seg = int(base.rsplit('.', 1)[0])
+                    except ValueError:
+                        continue
+                    video_segments[kind].append({
+                        'url': generate_s3_public_url(
+                            'get_object',
+                            {'Bucket': S3Config.Buckets.proctoring,
+                             'Key': key},
+                            ExpiresIn=3600),
+                        'segment': seg,
+                        'bytes': obj.get('Size'),
+                    })
+                video_segments[kind].sort(key=lambda s: s['segment'])
+            except Exception:
+                from logging import getLogger
+                getLogger(__name__).warning(
+                    'list recordings failed for %s/%s', sid, kind,
+                    exc_info=True)
+
+    # List periodic snapshots so the reviewer can scrub a coarse
+    # timeline without playing the whole recording. Capped at the most
+    # recent 120 of each kind (≈1 hour at 30 s interval) to keep the
+    # page light.
+    snapshots = {'screen': [], 'camera': []}
+    try:
+        resp = s3_internal.list_objects_v2(
+            Bucket=S3Config.Buckets.proctoring,
+            Prefix=f'{sid}/snapshots/',
+        )
+        for obj in resp.get('Contents', []):
+            key = obj['Key']
+            base = key.rsplit('/', 1)[-1]   # screen-1716440000123.jpg
+            kind = base.split('-', 1)[0]
+            if kind not in snapshots:
+                continue
+            url = generate_s3_public_url(
+                'get_object',
+                {'Bucket': S3Config.Buckets.proctoring, 'Key': key},
+                ExpiresIn=3600,
+            )
+            ts_str = base.split('-', 1)[1].rsplit('.', 1)[0]
+            try:
+                ts = datetime.fromtimestamp(int(ts_str) / 1000)
+            except ValueError:
+                ts = None
+            snapshots[kind].append({'url': url, 'ts': ts, 'key': key})
+        for k in snapshots:
+            snapshots[k].sort(key=lambda x: x['ts'] or datetime.min,
+                              reverse=True)
+            snapshots[k] = snapshots[k][:120]
+    except Exception:
+        from logging import getLogger
+        getLogger(__name__).warning('snapshot list failed', exc_info=True)
+
+    return render_template('proctor_admin_detail.html',
+                           contest=contest, session=sess, events=events,
+                           user=user, video_segments=video_segments,
+                           snapshots=snapshots)
+
 
 @require_logged_in
 def course_list_generic(title: str, description: str, query,

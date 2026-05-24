@@ -1,0 +1,1252 @@
+{% extends 'base.html' %}
+{% set page = '考前准备 · ' + contest.name %}
+
+{% block head %}
+<style>
+    /* Step wizard — modelled on commercial proctoring platforms.
+     * Five fixed-width steps in a horizontal strip; the active step
+     * is highlighted, completed steps get a green check, blocked
+     * steps get a red X. The CSS variables track the brand pink. */
+    :root {
+        --brand: #e77c8e;
+        --brand-soft: rgba(231,124,142,0.12);
+    }
+    .setup-stepper {
+        display: flex;
+        gap: 0;
+        margin: 0 0 28px 0;
+        padding: 0;
+        list-style: none;
+        border-bottom: 1px solid #e9ecef;
+    }
+    .setup-step {
+        flex: 1 1 0;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 16px 12px;
+        color: #6c757d;
+        position: relative;
+        border-bottom: 3px solid transparent;
+        font-size: 14px;
+    }
+    .setup-step.active { color: #212529; border-bottom-color: var(--brand); font-weight: 600; }
+    .setup-step.done { color: #6c757d; }
+    .setup-step.failed { color: #dc3545; }
+    .setup-step-num {
+        width: 28px; height: 28px; border-radius: 50%;
+        background: #e9ecef; color: #6c757d;
+        display: inline-flex; align-items: center; justify-content: center;
+        font-weight: 600; font-size: 14px; flex-shrink: 0;
+    }
+    /* Done state: neutral grey check, not a loud green — keeps the
+     * stepper feeling clean while the pink "active" tab still pops. */
+    .setup-step.done .setup-step-num { background: #adb5bd; color: #fff; font-size: 16px; }
+    .setup-step.failed .setup-step-num { background: #dc3545; color: #fff; }
+    /* Active wins over done/failed: the step the student is currently
+     * viewing always shows the pink badge, even if it's already been
+     * passed (auto-advance is off; they may dwell on a completed step
+     * before clicking 下一步). Listed last so the cascade picks pink. */
+    .setup-step.active .setup-step-num { background: var(--brand); color: #fff; font-size: 14px; }
+    .setup-step.active { background: var(--brand-soft); }
+    .setup-panel { min-height: 320px; padding: 8px 4px; }
+    .setup-panel.hidden { display: none; }
+    .setup-actions {
+        display: flex; justify-content: space-between;
+        padding-top: 16px; border-top: 1px solid #e9ecef; margin-top: 24px;
+    }
+    .probe-card {
+        border: 1px solid #e9ecef;
+        border-radius: 6px;
+        padding: 16px;
+        background: #fafbfc;
+    }
+    .probe-card.ok { border-color: var(--brand); background: rgba(231,124,142,0.08); }
+    .probe-card.fail { border-color: #dc3545; background: rgba(220,53,69,0.05); }
+    .probe-card.checking { border-color: var(--brand); background: var(--brand-soft); }
+    .probe-meta {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px; color: #495057;
+        background: #fff; border: 1px solid #e9ecef; border-radius: 4px;
+        padding: 8px 10px; margin-top: 8px;
+        max-height: 110px; overflow: auto;
+    }
+    .probe-icon { font-size: 28px; line-height: 1; margin-right: 8px; }
+    .camera-preview, .screen-preview-frame {
+        width: 100%; aspect-ratio: 4/3; background: #000;
+        border-radius: 4px; object-fit: cover;
+    }
+    .screen-preview-frame { aspect-ratio: 16/9; }
+    .requirement-pill {
+        display: inline-block; padding: 2px 10px; border-radius: 12px;
+        font-size: 11px; margin-right: 6px; background: var(--brand-soft);
+        color: var(--brand); font-weight: 600;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card card-body">
+    <h1 class="title-nav">
+        <span class="title-nav__title">考前准备</span>
+        <span class="title-nav__nav btn-group--title-nav">
+            <a href="{{ url_for('.contest_list') }}" class="btn btn-outline-primary">离开</a>
+        </span>
+    </h1>
+
+    <p class="text-muted mb-3">
+        本场比赛启用在线监考,请依次完成下列检查后再进入考试。
+        每步完成后请点击"下一步"前进,系统不会自动跳转。
+    </p>
+
+    <div class="mb-2">
+        <span class="text-muted small">本场要求:</span>
+        {%- if proctor_config.require_camera -%}<span class="requirement-pill">摄像头</span>{%- endif -%}
+        {%- if proctor_config.require_mic -%}<span class="requirement-pill">麦克风</span>{%- endif -%}
+        {%- if proctor_config.require_screen -%}<span class="requirement-pill">屏幕共享</span>{%- endif -%}
+        {%- if proctor_config.fullscreen_required -%}<span class="requirement-pill">全程全屏</span>{%- endif -%}
+        {%- if proctor_config.max_tab_switches is not none -%}
+        <span class="requirement-pill">切屏 ≤ {{ proctor_config.max_tab_switches }} 次</span>
+        {%- endif -%}
+    </div>
+
+    {# Steps adapt to the contest config: skip the camera step entirely
+       when neither camera nor mic is required, and skip the screen
+       step when screen sharing is off. #}
+    {%- set need_env = proctor_config.get('require_envcheck', True) -%}
+    {%- set need_cam = proctor_config.require_camera or proctor_config.require_mic -%}
+    {%- set need_scr = proctor_config.require_screen -%}
+    {#- The first rendered step gets ``active`` — env is the natural first
+        step when present, but when skipped, cam (or scr) inherits the
+        initial-active styling so the wizard doesn't render with no panel
+        highlighted. -#}
+    {%- set step_n = namespace(i=1, active_assigned=False) -%}
+    <ol class="setup-stepper" id="setup-stepper">
+        {%- if need_env -%}
+        <li class="setup-step active" data-step="env">
+            <span class="setup-step-num">{{ step_n.i }}</span> 环境检查
+        </li>
+        {%- set step_n.i = step_n.i + 1 -%}
+        {%- set step_n.active_assigned = True -%}
+        {%- endif -%}
+        {%- if need_cam -%}
+        <li class="setup-step{{ '' if step_n.active_assigned else ' active' }}" data-step="cam">
+            <span class="setup-step-num">{{ step_n.i }}</span>
+            {{ '摄像头与麦克风' if proctor_config.require_mic else '摄像头' }}
+        </li>
+        {%- set step_n.i = step_n.i + 1 -%}
+        {%- set step_n.active_assigned = True -%}
+        {%- endif -%}
+        {%- if need_scr -%}
+        <li class="setup-step{{ '' if step_n.active_assigned else ' active' }}" data-step="scr">
+            <span class="setup-step-num">{{ step_n.i }}</span> 屏幕共享
+        </li>
+        {%- set step_n.i = step_n.i + 1 -%}
+        {%- set step_n.active_assigned = True -%}
+        {%- endif -%}
+        <li class="setup-step{{ '' if step_n.active_assigned else ' active' }}" data-step="ready">
+            <span class="setup-step-num">{{ step_n.i }}</span> 进入考试
+        </li>
+    </ol>
+
+    {#- Track which panel is visible initially — mirrors the stepper's
+        ``active`` assignment so the cam (or scr) panel is shown when
+        env is skipped. -#}
+    {%- set panel_n = namespace(visible_assigned=False) -%}
+
+    {%- if need_env -%}
+    <!-- Step 1: env check -->
+    <div class="setup-panel" id="panel-env">
+        <h4 class="mb-3">运行环境检查</h4>
+        <p class="text-muted">检测显卡 / 虚拟机 / 远程桌面 / 软件渲染等特征,确认你在物理机上参加考试。</p>
+        <div class="probe-card checking" id="env-card">
+            <div class="d-flex align-items-center">
+                <div class="spinner-border spinner-border-sm text-primary mr-3" id="env-spinner"></div>
+                <div>
+                    <strong id="env-headline">正在检查…</strong>
+                    <div class="small text-muted" id="env-sub">通常 1 秒内完成</div>
+                </div>
+            </div>
+            <div id="env-meta" class="probe-meta" style="display:none"></div>
+            <ul id="env-reasons" class="small mb-0 mt-2" style="display:none"></ul>
+        </div>
+    </div>
+    {%- set panel_n.visible_assigned = True -%}
+    {%- endif -%}
+
+    {%- if need_cam -%}
+    <!-- Step 2: camera + mic -->
+    <div class="setup-panel{{ ' hidden' if panel_n.visible_assigned }}" id="panel-cam">
+        <h4 class="mb-3">摄像头与麦克风</h4>
+        <p class="text-muted">考试期间需要全程开启
+            {{ '摄像头与麦克风' if proctor_config.require_mic else '摄像头' }}。
+            点击下方按钮授权浏览器访问设备,授权后可以在预览框中确认画面正常。
+        </p>
+        <div class="row">
+            <div class="col-md-6">
+                <video id="cam-preview" autoplay muted playsinline class="camera-preview"></video>
+                <div class="small text-muted mt-1" id="cam-status">尚未授权</div>
+            </div>
+            <div class="col-md-6">
+                <div id="cam-meta" class="probe-meta" style="display:none"></div>
+                <button id="cam-request" class="btn btn-primary mt-3">授权摄像头{% if proctor_config.require_mic %}/麦克风{% endif %}</button>
+            </div>
+        </div>
+    </div>
+
+    {%- endif -%}
+
+    {%- if need_cam -%}
+    {%- set panel_n.visible_assigned = True -%}
+    {%- endif -%}
+
+    {%- if need_scr -%}
+    <!-- Step 3: screen -->
+    <div class="setup-panel{{ ' hidden' if panel_n.visible_assigned }}" id="panel-scr">
+        <h4 class="mb-3">屏幕共享</h4>
+        <p class="text-muted">
+            考试期间会全程录制你的屏幕。请在弹出的浏览器选择框中选择
+            <strong>「整个屏幕」</strong>,而不是某个应用窗口或浏览器标签 —
+            这样可以同时记录到你在其他应用中的活动。
+        </p>
+        <div class="row">
+            <div class="col-md-6">
+                <video id="scr-preview" autoplay muted playsinline class="screen-preview-frame"></video>
+                <div class="small text-muted mt-1" id="scr-status">尚未授权</div>
+            </div>
+            <div class="col-md-6">
+                <div id="scr-meta" class="probe-meta" style="display:none"></div>
+                <button id="scr-request" class="btn btn-primary mt-3">授权屏幕共享</button>
+                <p class="small text-muted mt-3">
+                    Tip: 在 Chrome 的弹框里点 "整个屏幕" → 选择监视器 → "共享"。
+                </p>
+            </div>
+        </div>
+    </div>
+
+    {%- set panel_n.visible_assigned = True -%}
+    {%- endif -%}
+
+    <!-- Step 4: confirm + enter -->
+    <div class="setup-panel{{ ' hidden' if panel_n.visible_assigned }}" id="panel-ready">
+        <h4 class="mb-3">准备完毕</h4>
+        <p class="text-muted">
+            所有检查通过。点击下方按钮进入考试 —
+            进入后浏览器会自动进入全屏,录像与监考事件将开始记录。
+        </p>
+        <ul class="list-unstyled mb-4 text-muted">
+            <li>✅ 显卡 / 环境正常</li>
+            <li>✅ 摄像头/麦克风已授权</li>
+            <li>✅ 屏幕共享已授权</li>
+        </ul>
+        <div id="enter-countdown" class="alert mb-3" style="
+            display: none;
+            background: var(--brand-soft);
+            border: 1px solid var(--brand);
+            color: var(--brand-dark, #c94e6d);">
+            <strong>考试尚未开始</strong> —
+            还有 <strong id="enter-countdown-text">--:--</strong> 后开放进入。
+        </div>
+        <button id="enter-btn" class="btn btn-primary btn-lg btn-block">
+            进入考试
+        </button>
+        <p class="text-muted small mt-3">
+            如果在过程中需要重新拔插摄像头或换屏幕,请按浏览器的提示重新授权。
+        </p>
+    </div>
+
+    <div class="setup-actions">
+        <button id="step-prev" class="btn btn-outline-secondary" disabled>上一步</button>
+        <button id="step-next" class="btn btn-outline-primary" disabled>下一步</button>
+    </div>
+
+    <div class="alert alert-danger mt-3" id="setup-warning" style="display:none"></div>
+</div>
+
+<script src="{{ url_for('.static', filename='js/proctor-envcheck.js') }}?v=20260523"></script>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.10/dist/livekit-client.umd.min.js"></script>
+<script>
+(function () {
+    const CONTEST_ID = {{ contest.id }};
+    const REQUIRE_CAMERA = {{ 'true' if proctor_config.require_camera else 'false' }};
+    const REQUIRE_MIC = {{ 'true' if proctor_config.require_mic else 'false' }};
+    const REQUIRE_SCREEN = {{ 'true' if proctor_config.require_screen else 'false' }};
+    const NEED_ENV = {{ 'true' if proctor_config.get('require_envcheck', True) else 'false' }};
+    const RECORD_CAMERA = {{ 'true' if proctor_config.get('record_camera', True) else 'false' }};
+    const RECORD_SCREEN = {{ 'true' if proctor_config.get('record_screen', True) else 'false' }};
+    const FULLSCREEN_REQUIRED = {{ 'true' if proctor_config.get('fullscreen_required', True) else 'false' }};
+    const PROBLEMSET_URL = "{{ url_for('.problemset', contest=contest) }}";
+    const PROBLEMSET_EMBED_URL = PROBLEMSET_URL + "?embed=1";
+    const SETUP_URL = "{{ url_for('.proctor_setup', contest=contest) }}";
+    const CREATE_SESSION_URL = "{{ url_for('.proctor_create_session') }}";
+    // The codebase stores contest times as NAIVE datetimes whose values
+    // are entered by the admin in their browser's local timezone
+    // (the ``<input type="datetime-local">`` widget). The server's
+    // ``g.time`` is also naive but reflects the *container* local
+    // time, so comparing the two in Python "works" only because they
+    // share the same naive view of the same wall clock — TZ-agnostic
+    // arithmetic is meaningless for real elapsed time.
+    //
+    // For the JS countdown we mirror the same convention: serialize
+    // each datetime as a "YYYY-MM-DDTHH:MM:SS" string and let
+    // ``new Date(s)`` interpret it as browser-local. As long as the
+    // admin and the student share a timezone (they do — same school),
+    // this gives the right gap.
+    const CONTEST_START_MS = new Date("{{ contest.start_time.strftime('%Y-%m-%dT%H:%M:%S') }}").getTime();
+    const CONTEST_END_MS = new Date("{{ contest.end_time.strftime('%Y-%m-%dT%H:%M:%S') }}").getTime();
+    const SERVER_TIME_URL = "{{ url_for('.proctor_server_time') }}";
+    // Server clock at page-render time, in the same naive-local
+    // convention as contest times (TZ=Asia/Shanghai container-side).
+    // Skew = browser_now - server_now ; subtract it from Date.now()
+    // to get the authoritative wall clock that a student-side
+    // clock tweak can't shorten.
+    let SERVER_SKEW_MS = Date.now() - new Date(
+        "{{ server_now_iso.split('+')[0].split('.')[0] }}").getTime();
+    const PROCTOR_PUBLIC_URL = "{{ proctor_public_url.rstrip('/') if proctor_public_url else '' }}";
+    // Derive the blueprint mount prefix (e.g. /OnlineJudge) once from
+    // a known route, so per-session endpoints work under any prefix.
+    const SESSIONS_BASE = "{{ url_for('.proctor_create_session') }}";
+    function apiSession(sid, suffix) {
+        return SESSIONS_BASE + '/' + sid + suffix;
+    }
+
+    // ---- step state ----
+    // Build the order list from the steps that are actually rendered.
+    // Skipping a step in the DOM also removes it from ORDER, so
+    // goTo(N+1) lands on the right next panel without referencing a
+    // hidden step.
+    const ORDER = Array.from(document.querySelectorAll('.setup-step'))
+        .map((el) => el.dataset.step);
+    let stepIdx = 0;
+    const state = {
+        env: { result: null },
+        cam: { stream: null, ok: !REQUIRE_CAMERA && !REQUIRE_MIC },
+        scr: { stream: null, ok: !REQUIRE_SCREEN },
+    };
+    function goTo(idx) {
+        stepIdx = Math.max(0, Math.min(ORDER.length - 1, idx));
+        ORDER.forEach((s, i) => {
+            document.querySelector(`[data-step="${s}"]`).classList.toggle('active', i === stepIdx);
+            document.getElementById(`panel-${s}`).classList.toggle('hidden', i !== stepIdx);
+        });
+        document.getElementById('step-prev').disabled = stepIdx === 0;
+        updateNextButton();
+    }
+    function markDone(step) {
+        const li = document.querySelector(`[data-step="${step}"]`);
+        li.classList.add('done');
+        li.classList.remove('failed');
+        // Swap the step number badge for a check mark on completion.
+        const num = li.querySelector('.setup-step-num');
+        if (num) num.textContent = '✓';
+        updateNextButton();
+    }
+    function markFailed(step) {
+        const li = document.querySelector(`[data-step="${step}"]`);
+        li.classList.add('failed');
+        li.classList.remove('done');
+        updateNextButton();
+    }
+    function updateNextButton() {
+        const cur = ORDER[stepIdx];
+        const done = {
+            env: state.env.result && !state.env.result.blocked,
+            cam: state.cam.ok,
+            scr: state.scr.ok,
+            ready: false,
+        }[cur];
+        document.getElementById('step-next').disabled = !done || stepIdx === ORDER.length - 1;
+    }
+    function warn(msg) {
+        const el = document.getElementById('setup-warning');
+        el.style.display = 'block';
+        el.textContent = msg;
+    }
+
+    // ---- Step 1: env check ----
+    async function runEnvCheck() {
+        const card = document.getElementById('env-card');
+        const spinner = document.getElementById('env-spinner');
+        const headline = document.getElementById('env-headline');
+        const sub = document.getElementById('env-sub');
+        const meta = document.getElementById('env-meta');
+        const reasons = document.getElementById('env-reasons');
+        try {
+            const r = await window.ProctorEnvCheck.run();
+            state.env.result = r;
+            spinner.remove();
+            card.classList.remove('checking');
+            // Don't expose GPU model / vendor strings to the student —
+            // these read as scary "tracking" telemetry to a non-
+            // technical user. The full envcheck payload still goes
+            // to the server as part of client_meta for admin review.
+            if (r.blocked) {
+                card.classList.add('fail');
+                headline.innerHTML = '<span class="text-danger">✗ 环境检测未通过,无法进入考试</span>';
+                // Only the high-level reasons (eg. "检测到虚拟机") are
+                // surfaced to the student; the matched substring is
+                // useful for the admin audit log, not the student.
+                sub.textContent = '本场考试禁止虚拟机 / 远程桌面 / 软件渲染环境,请在物理机上重新进入。';
+                reasons.style.display = 'block';
+                reasons.innerHTML = (r.reasons || [])
+                    .map((x) => `<li class="text-danger">${x.label}</li>`)
+                    .join('');
+                markFailed('env');
+            } else {
+                card.classList.add('ok');
+                headline.innerHTML = '<span style="color:var(--brand)">✓ 通过</span>';
+                sub.textContent = '';
+                markDone('env');
+            }
+        } catch (e) {
+            card.classList.add('fail');
+            spinner.remove();
+            headline.innerHTML = '<span class="text-danger">✗ 检测脚本异常</span>';
+            sub.textContent = String(e.message || e);
+            markFailed('env');
+        }
+    }
+    if (NEED_ENV) {
+        if (window.ProctorEnvCheck) {
+            runEnvCheck();
+        } else {
+            // Script not loaded — surface honestly rather than spin forever.
+            const h = document.getElementById('env-headline');
+            if (h) h.textContent = '环境检测脚本加载失败';
+            markFailed('env');
+        }
+    }
+
+    // ---- contest-start countdown ----
+    // The 进入考试 button is gated on ``g.time < contest.start_time``
+    // server-side (the create-session route rejects pre-start
+    // submissions). In the UI we mirror that by disabling the button
+    // and showing a live countdown, so the student doesn't burn a
+    // click only to get a 403. Skew-corrected against the server
+    // clock to defeat a student who set their laptop ahead.
+    (function setupStartCountdown() {
+        const banner = document.getElementById('enter-countdown');
+        const txt = document.getElementById('enter-countdown-text');
+        const enterBtn = document.getElementById('enter-btn');
+        if (!banner || !enterBtn) return;
+        function fmt(ms) {
+            const s = Math.max(0, Math.floor(ms / 1000));
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const r = s % 60;
+            const pad = (n) => String(n).padStart(2, '0');
+            return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
+        }
+        function tick() {
+            const now = Date.now() - SERVER_SKEW_MS;
+            const remaining = CONTEST_START_MS - now;
+            if (remaining > 0) {
+                banner.style.display = 'block';
+                txt.textContent = fmt(remaining);
+                enterBtn.disabled = true;
+                enterBtn.textContent = '考试尚未开始';
+            } else if (now > CONTEST_END_MS) {
+                banner.style.display = 'block';
+                banner.querySelector('strong').textContent = '考试已结束';
+                txt.parentElement.style.display = 'none';
+                enterBtn.disabled = true;
+                enterBtn.textContent = '考试已结束';
+                clearInterval(timer);
+            } else {
+                banner.style.display = 'none';
+                if (enterBtn.textContent !== '进入考试') {
+                    enterBtn.textContent = '进入考试';
+                }
+                enterBtn.disabled = false;
+                clearInterval(timer);
+            }
+        }
+        const timer = setInterval(tick, 500);
+        tick();
+
+        // Periodically re-sync with the server so a slow-drifting
+        // browser clock (or one the student is actively tampering
+        // with) can't gradually shorten the displayed countdown.
+        // Cheap GET, runs every 30 s while the wizard is open.
+        async function resyncSkew() {
+            try {
+                const r = await fetch(SERVER_TIME_URL, { credentials: 'same-origin' });
+                if (!r.ok) return;
+                const j = await r.json();
+                const serverWall = new Date(j.server_now).getTime();
+                SERVER_SKEW_MS = Date.now() - serverWall;
+            } catch (_) {}
+        }
+        setInterval(resyncSkew, 30000);
+    })();
+
+    // ---- Step 2: camera + mic ----
+    // Both elements (#cam-request, #scr-request) are only rendered
+    // when the contest config asks for them — defensive null check
+    // here so a screen-only or camera-only contest doesn't blow up
+    // the rest of the wizard with a null.addEventListener crash.
+    document.getElementById('cam-request')?.addEventListener('click', async () => {
+        const status = document.getElementById('cam-status');
+        const preview = document.getElementById('cam-preview');
+        const meta = document.getElementById('cam-meta');
+        const btn = document.getElementById('cam-request');
+        btn.disabled = true;
+        status.textContent = '等待权限授权…';
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: REQUIRE_CAMERA ? { width: 320, height: 240 } : false,
+                audio: REQUIRE_MIC,
+            });
+            state.cam.stream = stream;
+            state.cam.ok = true;
+            preview.srcObject = stream;
+            const v = stream.getVideoTracks()[0];
+            const a = stream.getAudioTracks()[0];
+            meta.style.display = 'block';
+            meta.textContent =
+                (v ? ('摄像头: ' + (v.label || '(无名)') + '\n') : '') +
+                (a ? ('麦克风: ' + (a.label || '(无名)')) : '');
+            status.innerHTML = '<span class="text-success">✓ 设备已就绪</span>';
+            markDone('cam');
+        } catch (e) {
+            // e.message comes from browser API → could in principle
+            // carry attacker-shaped chars. Build the node tree
+            // explicitly instead of innerHTML.
+            status.textContent = '';
+            const span = document.createElement('span');
+            span.className = 'text-danger';
+            span.textContent = '✗ ' + (e.message || String(e));
+            status.appendChild(span);
+            btn.disabled = false;
+        }
+    });
+
+    // ---- Step 3: screen ----
+    //
+    // Policy: only "整个屏幕" (displaySurface === 'monitor') is
+    // accepted. A student who picks a single window or a single
+    // browser tab in the picker would be able to hide everything
+    // they're doing in other apps, so we hard-reject those and ask
+    // them to retry.
+    document.getElementById('scr-request')?.addEventListener('click', async () => {
+        const status = document.getElementById('scr-status');
+        const preview = document.getElementById('scr-preview');
+        const meta = document.getElementById('scr-meta');
+        const btn = document.getElementById('scr-request');
+        btn.disabled = true;
+        status.textContent = '等待权限授权…';
+        try {
+            const stream = await navigator.mediaDevices.getDisplayMedia({
+                video: {
+                    displaySurface: 'monitor',
+                    width: { ideal: 3840, max: 3840 },
+                    height: { ideal: 2160, max: 2160 },
+                    frameRate: { ideal: 10, max: 15 },
+                },
+                audio: false,
+            });
+            const v = stream.getVideoTracks()[0];
+            const s = v && v.getSettings ? v.getSettings() : {};
+            // Hard gate: any selection other than the full monitor is
+            // rejected. Stop the stream so the device is free for the
+            // next attempt.
+            if (s.displaySurface !== 'monitor') {
+                stream.getTracks().forEach((t) => t.stop());
+                status.innerHTML =
+                    '<span class="text-danger">✗ 你选择了 ' +
+                    (s.displaySurface || '未知') +
+                    ',本场考试要求必须选择「整个屏幕」。请点击按钮重新选择。</span>';
+                btn.disabled = false;
+                return;
+            }
+            state.scr.stream = stream;
+            state.scr.ok = true;
+            preview.srcObject = stream;
+            meta.style.display = 'block';
+            meta.textContent =
+                '类型: 整个屏幕\n' +
+                '分辨率: ' + (s.width || '?') + 'x' + (s.height || '?') + '\n' +
+                '帧率: ' + (s.frameRate || '?');
+            status.innerHTML = '<span class="text-success">✓ 屏幕共享已就绪</span>';
+            markDone('scr');
+        } catch (e) {
+            status.textContent = '';
+            const span = document.createElement('span');
+            span.className = 'text-danger';
+            span.textContent = '✗ ' + (e.message || String(e));
+            status.appendChild(span);
+            btn.disabled = false;
+        }
+    });
+
+    // ---- prev/next ----
+    document.getElementById('step-prev').addEventListener('click', () => goTo(stepIdx - 1));
+    document.getElementById('step-next').addEventListener('click', () => goTo(stepIdx + 1));
+
+    // ---- Step 4: enter exam ----
+    //
+    // Critical: we do NOT navigate away from this page. The wizard
+    // already acquired camera/screen streams; navigating would
+    // discard them and force a second permission prompt + the gray
+    // "click to start" overlay. Instead we keep the streams alive
+    // in this document and embed the contest content as a full-
+    // viewport iframe. Parent-side MediaRecorder + event tracking
+    // continues without interruption.
+    document.getElementById('enter-btn').addEventListener('click', async () => {
+        const btn = document.getElementById('enter-btn');
+        btn.disabled = true;
+        btn.textContent = '正在创建监考会话…';
+        if (NEED_ENV && (!state.env.result || state.env.result.blocked)) {
+            warn('环境检测未通过,无法进入考试。');
+            btn.disabled = false; btn.textContent = '进入考试';
+            return;
+        }
+        // requestFullscreen() must run within a user gesture; do it now
+        // before the async session-creation fetch consumes the click.
+        // If fullscreen is denied (browser blocked or user dismissed)
+        // we still proceed — installEventTracking will log subsequent
+        // fullscreen_exit events as violations and the overlay will
+        // shroud the iframe until the student manually recovers.
+        if (FULLSCREEN_REQUIRED) {
+            try { await document.documentElement.requestFullscreen({ navigationUI: 'hide' }); }
+            catch (_) {}
+            // Keyboard Lock API: capture ESC so the student can't bail
+            // out of fullscreen with one keystroke. As a side effect
+            // Chrome/Edge also suppresses the "Press ESC to exit
+            // fullscreen" UA toast, which used to mislead students
+            // into thinking ESC was an intended exit. Best-effort —
+            // Firefox/Safari lack support and we ignore the rejection.
+            if (navigator.keyboard && navigator.keyboard.lock) {
+                try { await navigator.keyboard.lock(['Escape']); }
+                catch (_) {}
+            }
+        }
+        try {
+            const r = await fetch(CREATE_SESSION_URL, {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'X-Acmoj-Is-Csrf': 'no' },
+                body: JSON.stringify({
+                    contest_id: CONTEST_ID,
+                    client_meta: {
+                        userAgent: navigator.userAgent,
+                        screen: { w: screen.width, h: screen.height, dpr: devicePixelRatio },
+                        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                        envcheck: state.env.result,
+                    },
+                }),
+            });
+            if (!r.ok) {
+                const t = await r.text();
+                warn('创建会话失败: ' + t.slice(0, 200));
+                btn.disabled = false; btn.textContent = '重试进入';
+                return;
+            }
+            const data = await r.json();
+            sessionStorage.setItem('proctor:' + data.session_id, data.token);
+            startExam(data.session_id, data.token);
+        } catch (e) {
+            warn('网络错误: ' + (e.message || e));
+            btn.disabled = false; btn.textContent = '重试进入';
+        }
+    });
+
+    // -------------------- in-page exam runtime -----------------------
+    //
+    // Once the session is minted, replace the wizard with a full-
+    // viewport iframe that loads the contest content with ?embed=1
+    // (which suppresses its own proctor.js injection). Parent-side
+    // MediaRecorders use the already-acquired streams to push chunks;
+    // the visibilitychange/blur listeners on this window catch tab
+    // switches the same way proctor.js would.
+    function startExam(sid, token) {
+        // Replace document body with a full-viewport iframe. The
+        // parent's window/document keeps the streams + recorder +
+        // event listeners; the iframe shows the actual exam UI.
+        document.body.innerHTML = `
+          <iframe id="exam-frame" src="${PROBLEMSET_EMBED_URL}"
+              allow="camera; microphone; display-capture; fullscreen; cross-origin-isolated"
+              style="position:fixed;inset:0;border:0;width:100vw;height:100vh">
+          </iframe>
+          <div id="exam-chip" style="
+              position:fixed;left:12px;bottom:12px;z-index:2147483646;
+              background:rgba(231,124,142,0.92);color:#fff;
+              padding:6px 12px;border-radius:14px;
+              font:12px/1.4 -apple-system,Segoe UI,Helvetica,sans-serif">
+              监考中
+          </div>
+          <style>
+            #cam-thumb-toggle {
+              appearance: none;
+              -webkit-appearance: none;
+              background: linear-gradient(180deg,#e77c8e 0%,#d96680 100%);
+              color: #fff;
+              border: 0; outline: 0; padding: 0;
+              width: 16px; height: 64px; align-self: center;
+              font: 600 13px/1 -apple-system,Segoe UI,Helvetica,sans-serif;
+              border-radius: 8px 0 0 8px;
+              cursor: pointer; user-select: none;
+              display: flex; align-items: center; justify-content: center;
+              transition: background .15s ease, width .15s ease;
+              position: relative;
+            }
+            #cam-thumb-toggle::before {
+              content: ""; position: absolute; left: -3px; top: 0; bottom: 0;
+              width: 3px; background: rgba(0,0,0,.05);
+              border-radius: 3px 0 0 3px;
+            }
+            #cam-thumb-toggle:hover {
+              background: linear-gradient(180deg,#ec8da0 0%,#dc7088 100%);
+              width: 20px;
+            }
+            #cam-thumb-toggle:focus-visible {
+              box-shadow: 0 0 0 2px rgba(231,124,142,.4);
+            }
+            #cam-thumb-toggle svg {
+              width: 10px; height: 10px;
+              transition: transform .25s ease;
+              filter: drop-shadow(0 1px 0 rgba(0,0,0,.15));
+            }
+            #cam-thumb-wrap.collapsed #cam-thumb-toggle svg {
+              transform: rotate(180deg);
+            }
+          </style>
+          <div id="cam-thumb-wrap" style="
+              position:fixed;right:0;bottom:148px;z-index:2147483645;
+              display:flex;align-items:stretch;
+              transition:transform .25s ease;">
+            <button id="cam-thumb-toggle" type="button" aria-label="收起/展开摄像头预览">
+              <svg viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                <path d="M3.5 1.5 L7.5 5 L3.5 8.5"
+                      stroke="currentColor" stroke-width="1.8"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <video id="cam-thumb" autoplay muted playsinline style="
+                width:160px;height:120px;object-fit:cover;
+                border:2px solid #e77c8e;border-right:none;
+                border-radius:6px 0 0 6px;
+                background:#000;display:block;margin-right:12px;
+                box-shadow:0 4px 12px rgba(0,0,0,.18)"></video>
+          </div>
+          <button id="end-exam-btn" style="
+              position:fixed;right:12px;bottom:12px;width:160px;
+              padding:10px 0;font-size:14px;font-weight:600;
+              border:0;border-radius:6px;cursor:pointer;
+              background:#e77c8e;color:#fff;
+              box-shadow:0 2px 6px rgba(0,0,0,0.15);
+              z-index:2147483645">
+              交卷 / 结束考试
+          </button>
+        `;
+        const thumb = document.getElementById('cam-thumb');
+        const thumbWrap = document.getElementById('cam-thumb-wrap');
+        const thumbToggle = document.getElementById('cam-thumb-toggle');
+        if (state.cam.stream) {
+            thumb.srcObject = state.cam.stream;
+            // Collapsible: clicking the side handle slides the whole
+            // 160×120 video off the right edge of the viewport so it
+            // doesn't sit over the contest UI; only the 18-px pink
+            // handle stays visible at the screen edge to bring it
+            // back. State persists across refresh.
+            const STORAGE_KEY = 'proctorCamThumbCollapsed';
+            function applyCollapsed(collapsed) {
+                // Video width (160) + its right margin (12) = 172px to slide off.
+                thumbWrap.style.transform = collapsed
+                    ? 'translateX(172px)' : 'translateX(0)';
+                // The CSS rotates the chevron 180° when .collapsed is set,
+                // flipping the SVG's default right-pointing glyph to point
+                // left, matching the action ("pull back").
+                thumbWrap.classList.toggle('collapsed', collapsed);
+                thumbToggle.title = collapsed
+                    ? '展开摄像头预览' : '隐藏摄像头预览';
+            }
+            let collapsed = false;
+            try { collapsed = localStorage.getItem(STORAGE_KEY) === '1'; } catch (e) {}
+            applyCollapsed(collapsed);
+            thumbToggle.addEventListener('click', () => {
+                collapsed = !collapsed;
+                try { localStorage.setItem(STORAGE_KEY, collapsed ? '1' : '0'); } catch (e) {}
+                applyCollapsed(collapsed);
+            });
+        } else {
+            thumbWrap.style.display = 'none';
+            // Re-anchor the end button to the bottom when no camera
+            // preview occupies that slot.
+            document.getElementById('end-exam-btn').style.bottom = '12px';
+        }
+        document.getElementById('end-exam-btn').addEventListener('click',
+            () => endExam(sid));
+
+        // The contest iframe tells us when the student drills into a
+        // specific problem — at that point we hide 交卷, because
+        // finishing the exam should be a deliberate "I'm done with
+        // everything" action taken from the list view, not an
+        // accidental click while looking at one problem.
+        const endBtn = document.getElementById('end-exam-btn');
+        window.addEventListener('message', (e) => {
+            if (!e.data || e.data.type !== 'proctor:view') return;
+            endBtn.style.display = e.data.view === 'list' ? '' : 'none';
+        });
+
+        // Per-kind recording is gated on the contest config. Without
+        // these guards a contest with 录制摄像头 unchecked would still
+        // POST chunks to proctor2 → S3.  LiveKit publish below is
+        // separate (real-time admin view); it is NOT a recording path
+        // and does not write to S3.
+        if (RECORD_CAMERA) startRecording('camera', state.cam.stream, sid, token);
+        if (RECORD_SCREEN) startRecording('screen', state.scr.stream, sid, token);
+        installEventTracking(sid);
+        publishToLiveKit(sid);
+    }
+
+    // -------------------- LiveKit publish (SFU) ---------------------
+    //
+    // Replaces the per-admin WebRTC mesh. Student publishes ONE
+    // outbound stream into a contest-wide LiveKit room; the SFU fans
+    // it out to every admin viewing the dashboard, no matter how
+    // many admins are watching. Bandwidth from the student is
+    // constant regardless of viewer count.
+    let lkRoom = null;
+    async function publishToLiveKit(sid) {
+        if (typeof LivekitClient === 'undefined') {
+            console.warn('LiveKit client SDK not loaded');
+            return;
+        }
+        try {
+            const r = await fetch(
+                apiSession(sid, "/livekit-token"),
+                { method: 'POST', credentials: 'same-origin',
+                  headers: { 'X-Acmoj-Is-Csrf': 'no' } });
+            if (!r.ok) throw new Error('token fetch ' + r.status);
+            const cfg = await r.json();
+            const { Room, Track } = LivekitClient;
+            lkRoom = new Room({
+                adaptiveStream: true,
+                dynacast: true,
+            });
+            await lkRoom.connect(cfg.url, cfg.token);
+            if (state.cam.stream) {
+                for (const t of state.cam.stream.getTracks()) {
+                    if (t.kind === 'video') {
+                        await lkRoom.localParticipant.publishTrack(t, {
+                            source: Track.Source.Camera, name: 'camera',
+                        });
+                    } else if (t.kind === 'audio') {
+                        await lkRoom.localParticipant.publishTrack(t, {
+                            source: Track.Source.Microphone, name: 'mic',
+                        });
+                    }
+                }
+            }
+            if (state.scr.stream) {
+                for (const t of state.scr.stream.getTracks()) {
+                    if (t.kind === 'video') {
+                        await lkRoom.localParticipant.publishTrack(t, {
+                            source: Track.Source.ScreenShare, name: 'screen',
+                        });
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('LiveKit publish failed:', e);
+            // Recording still works through proctor2; SFU dashboard
+            // just won't see this student's live stream.
+        }
+    }
+
+    // -------------------- live snapshot pump ------------------------
+    //
+    // Why: WebM keyframes in screen recordings are sparse (encoder
+    // sees mostly-static content), so the admin dashboard's partial-
+    // WebM seek-to-end lands on stale frames. Streaming a JPEG every
+    // 3 s sidesteps that entirely — admin always sees the actually-
+    // current screen.
+    function startLiveSnap(sid) {
+        for (const [kind, stream] of [['camera', state.cam.stream],
+                                       ['screen', state.scr.stream]]) {
+            if (!stream) continue;
+            (async () => {
+                while (true) {
+                    await new Promise((r) => setTimeout(r, 3000));
+                    await pushOneSnap(sid, kind, stream).catch(() => {});
+                }
+            })();
+        }
+    }
+    async function pushOneSnap(sid, kind, stream) {
+        const track = stream.getVideoTracks()[0];
+        if (!track || track.readyState !== 'live') return;
+        let bitmap;
+        try {
+            const ic = new ImageCapture(track);
+            bitmap = await ic.grabFrame();
+        } catch (_) {
+            // Fallback for browsers without ImageCapture
+            const v = document.createElement('video');
+            v.muted = true; v.playsInline = true;
+            v.srcObject = new MediaStream([track]);
+            await v.play().catch(() => {});
+            if (!v.videoWidth) return;
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.min(640, v.videoWidth);
+            canvas.height = Math.round(canvas.width * v.videoHeight / v.videoWidth);
+            canvas.getContext('2d').drawImage(v, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.6));
+            v.srcObject = null;
+            if (blob) await uploadSnap(sid, kind, blob);
+            return;
+        }
+        const w = Math.min(640, bitmap.width);
+        const h = Math.round(w * bitmap.height / bitmap.width);
+        let blob;
+        if (typeof OffscreenCanvas !== 'undefined') {
+            const oc = new OffscreenCanvas(w, h);
+            oc.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+            blob = await oc.convertToBlob({ type: 'image/jpeg', quality: 0.6 });
+        } else {
+            const canvas = document.createElement('canvas');
+            canvas.width = w; canvas.height = h;
+            canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+            blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.6));
+        }
+        if (blob) await uploadSnap(sid, kind, blob);
+    }
+    async function uploadSnap(sid, kind, blob) {
+        await fetch(apiSession(sid, "/livesnap?kind=" + kind), {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'image/jpeg', 'X-Acmoj-Is-Csrf': 'no' },
+            body: blob,
+        });
+    }
+
+    // -------------------- WebRTC live observation -------------------
+    //
+    // When an admin clicks "实时观察" on the dashboard, their browser
+    // POSTs {kind:'request_view'} on the per-session Redis pub/sub
+    // channel. We subscribe to that channel via SSE and respond by
+    // attaching our existing camera+screen MediaStream tracks to a
+    // fresh RTCPeerConnection. The admin sends the SDP offer; we
+    // answer. ICE candidates flow either direction through the same
+    // signaling channel. No new gesture or permission prompt — the
+    // streams are already alive in this document.
+    const ICE_CONFIG = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    };
+    let livePeer = null;
+    let liveSig = null;
+
+    function teardownLivePeer() {
+      if (livePeer) { try { livePeer.close(); } catch (_) {} livePeer = null; }
+    }
+
+    async function sendSignalForLive(sid, payload) {
+      try {
+        await fetch(apiSession(sid, "/signal"), {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', 'X-Acmoj-Is-Csrf': 'no' },
+          body: JSON.stringify(payload),
+        });
+      } catch (_) {}
+    }
+
+    async function handleAdminSignal(sid, data) {
+      if (data.kind === 'request_view') {
+        teardownLivePeer();
+        livePeer = new RTCPeerConnection(ICE_CONFIG);
+        livePeer.onicecandidate = (e) => {
+          if (e.candidate) sendSignalForLive(sid, { kind: 'ice', candidate: e.candidate });
+        };
+        livePeer.onconnectionstatechange = () => {
+          if (!livePeer) return;
+          const s = livePeer.connectionState;
+          if (s === 'failed' || s === 'closed' || s === 'disconnected') {
+            teardownLivePeer();
+          }
+        };
+        const streamMap = [];
+        if (state.cam.stream) {
+          for (const t of state.cam.stream.getTracks()) {
+            livePeer.addTrack(t, state.cam.stream);
+          }
+          streamMap.push({ stream_id: state.cam.stream.id, kind_of: 'camera' });
+        }
+        if (state.scr.stream) {
+          for (const t of state.scr.stream.getTracks()) {
+            livePeer.addTrack(t, state.scr.stream);
+          }
+          streamMap.push({ stream_id: state.scr.stream.id, kind_of: 'screen' });
+        }
+        // The admin's <video> elements key on the MediaStream id
+        // (which survives the WebRTC SDP) — send the map first so
+        // the receive-side dispatches each track to the right panel.
+        await sendSignalForLive(sid, { kind: 'tracks_info', streams: streamMap });
+        await sendSignalForLive(sid, { kind: 'ready_to_negotiate' });
+      } else if (data.kind === 'sdp' && data.sdp && livePeer) {
+        await livePeer.setRemoteDescription(data.sdp);
+        if (data.sdp.type === 'offer') {
+          const answer = await livePeer.createAnswer();
+          await livePeer.setLocalDescription(answer);
+          await sendSignalForLive(sid, { kind: 'sdp', sdp: livePeer.localDescription });
+        }
+      } else if (data.kind === 'ice' && data.candidate && livePeer) {
+        try { await livePeer.addIceCandidate(data.candidate); } catch (_) {}
+      } else if (data.kind === 'end_view') {
+        teardownLivePeer();
+      }
+    }
+
+    // -------------------- end exam (student-initiated) --------------
+    //
+    // Closes the proctor session cleanly: stops every recorder, then
+    // POSTs /end so the server marks the session 'ended' and proctor2
+    // finalizes the spool files to MinIO. We deliberately confirm
+    // before doing this — a misclick mid-exam would otherwise lose
+    // the student their remaining time.
+    // Every recurring timer or async loop spawned by the in-exam
+    // runtime is registered here so endExam can tear them all down
+    // before navigating away. Without this they leak across the
+    // "考试已结束" page, keep posting events, and (worse) keep the
+    // MediaRecorder alive in the background.
+    const examTimers = [];
+    const _origSetInterval = window.setInterval;
+    window.setInterval = function (fn, ms, ...args) {
+        const id = _origSetInterval.call(window, fn, ms, ...args);
+        examTimers.push(id);
+        return id;
+    };
+
+    let endingExam = false;
+    async function endExam(sid) {
+        if (endingExam) return;
+        if (!confirm('确定要结束考试吗?\n\n结束后录像将上传归档,无法重新进入本场比赛。')) return;
+        endingExam = true;
+        // Clear every registered interval / loop before we tear down
+        // streams or navigate. Doing this first prevents one more
+        // chunk-upload / heartbeat being fired after we've already
+        // decided the exam is over.
+        for (const id of examTimers) { try { clearInterval(id); } catch (_) {} }
+        examTimers.length = 0;
+        const btn = document.getElementById('end-exam-btn');
+        if (btn) { btn.disabled = true; btn.textContent = '正在结束…'; }
+        // Tear down the LiveKit publisher cleanly.
+        if (lkRoom) { try { await lkRoom.disconnect(); } catch (_) {} lkRoom = null; }
+        // Stop tracks so the OS-level recording indicator turns off
+        // immediately, even if the server call is slow.
+        for (const s of [state.cam.stream, state.scr.stream]) {
+            if (s) { try { s.getTracks().forEach((t) => t.stop()); } catch (_) {} }
+        }
+        try {
+            await fetch(apiSession(sid, "/end"), {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'X-Acmoj-Is-Csrf': 'no' },
+            });
+        } catch (_) {}
+        // Drop them back at the contest list with a friendly summary.
+        document.body.innerHTML = `
+          <div style="
+              display:flex;flex-direction:column;align-items:center;
+              justify-content:center;height:100vh;text-align:center;
+              font:16px/1.5 -apple-system,Segoe UI,Helvetica,sans-serif;
+              background:#fafbfc;color:#212529">
+              <div style="font-size:48px;color:#28a745;margin-bottom:16px">✓</div>
+              <h2 style="margin:0 0 8px">考试已结束</h2>
+              <p style="color:#6c757d;max-width:480px;margin-bottom:24px">
+                  录像与事件已归档,如有违规行为将由监考老师后台审核。<br>
+                  你现在可以关闭这个窗口。
+              </p>
+              <a href="/OnlineJudge/" style="
+                  background:#e77c8e;color:#fff;padding:10px 24px;
+                  border-radius:6px;text-decoration:none;font-weight:600">
+                  返回主页
+              </a>
+          </div>`;
+    }
+
+    function openSignalingChannel(sid) {
+      if (liveSig) return;
+      liveSig = new EventSource(
+        apiSession(sid, "/signal/stream"));
+      liveSig.onmessage = (ev) => {
+        let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+        // The server stamps msg.from = 'student' on our own posts;
+        // ignore those so we don't react to our own echoes.
+        if (msg.from === 'student' || !msg.data) return;
+        handleAdminSignal(sid, msg.data).catch(() => {});
+      };
+      liveSig.onerror = () => {
+        // EventSource auto-reconnects; nothing to do.
+      };
+    }
+
+    function startRecording(kind, stream, sid, token) {
+        if (!stream || !PROCTOR_PUBLIC_URL) return;
+        const mime =
+            (kind === 'screen'
+                ? ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+                : ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+            ).find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+        let rec;
+        try {
+            rec = new MediaRecorder(stream,
+                mime ? { mimeType: mime,
+                         videoBitsPerSecond: kind === 'screen' ? 2_000_000 : 250_000 } : {});
+        } catch (_) { return; }
+        let seq = 0;
+        rec.ondataavailable = async (e) => {
+            if (!e.data || !e.data.size) return;
+            const mySeq = seq++;
+            try {
+                await fetch(`${PROCTOR_PUBLIC_URL}/chunk/${sid}/${kind}/${mySeq}`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + token,
+                        'Content-Type': 'application/octet-stream',
+                    },
+                    body: e.data,
+                });
+            } catch (_) {}
+        };
+        rec.start(5000);
+        // Detect track-end so we can show a recovery toast — the
+        // student unplugged the webcam mid-exam. We also explicitly
+        // stop the recorder so the spool file stops growing; the
+        // admin dashboard's "无录像" overlay keys on the spool's
+        // mtime going stale.
+        for (const t of stream.getTracks()) {
+            t.addEventListener('ended', () => {
+                postEvent(sid,
+                    kind === 'screen' ? 'screen_share_stopped' : 'camera_track_ended',
+                    kind === 'screen' ? 'violation' : 'warning');
+                try { if (rec.state !== 'inactive') rec.stop(); } catch (_) {}
+            });
+        }
+    }
+
+    const eventQueue = [];
+    let flushTimer = null;
+    function postEvent(sid, eventType, severity, detail) {
+        eventQueue.push({
+            event_type: eventType, severity: severity || 'info',
+            detail: detail || null, client_ts: Date.now(),
+        });
+        if (severity === 'violation') flushEvents(sid);
+        else if (!flushTimer) flushTimer = setTimeout(() => flushEvents(sid), 1500);
+    }
+    async function flushEvents(sid) {
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        if (!eventQueue.length) return;
+        const batch = eventQueue.splice(0);
+        try {
+            await fetch(apiSession(sid, "/events"), {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'X-Acmoj-Is-Csrf': 'no' },
+                body: JSON.stringify({ events: batch }),
+            });
+        } catch (_) { eventQueue.unshift(...batch); }
+    }
+
+    function installEventTracking(sid) {
+        postEvent(sid, 'session_start', 'info');
+        document.addEventListener('visibilitychange', () => {
+            postEvent(sid, document.hidden ? 'visibility_hidden' : 'visibility_visible',
+                      document.hidden ? 'violation' : 'info');
+        });
+        window.addEventListener('blur', () => postEvent(sid, 'window_blur', 'violation'));
+        window.addEventListener('focus', () => postEvent(sid, 'window_focus', 'info'));
+        // Fullscreen guard. The browser will not silently re-enter
+        // fullscreen (must be a user gesture), so once the student
+        // exits we kick them straight back to the setup wizard — they
+        // have to re-grant streams (cam/screen pickers replay) and
+        // click 进入考试 again, which re-runs requestFullscreen inside
+        // the click handler. The session row stays active so violation
+        // count and recordings carry over.
+        //
+        // The fullscreen_exit event must hit the server BEFORE we
+        // navigate; postEvent queues it and the queue is drained on
+        // the regular flush timer, which won't fire if we navigate
+        // first. We synchronously sendBeacon to guarantee delivery.
+        if (FULLSCREEN_REQUIRED) {
+            document.addEventListener('fullscreenchange', () => {
+                if (document.fullscreenElement) {
+                    postEvent(sid, 'fullscreen_enter', 'info');
+                    return;
+                }
+                // Synchronously ship the violation before nav. Use
+                // sendBeacon (text/plain CORS-safe; JSON payload).
+                try {
+                    navigator.sendBeacon(
+                        apiSession(sid, '/events?via=beacon'),
+                        new Blob([JSON.stringify({
+                            events: [{
+                                type: 'fullscreen_exit',
+                                severity: 'violation',
+                                detail: { reason: 'student_exited_fullscreen' },
+                                ts: Date.now(),
+                            }],
+                        })], { type: 'application/json' }));
+                } catch (_) {}
+                // Drop the iframe immediately so the contest UI flashes
+                // for as little time as possible while the redirect
+                // settles.
+                const frame = document.getElementById('exam-frame');
+                if (frame) frame.style.visibility = 'hidden';
+                window.location.replace(SETUP_URL);
+            });
+        }
+        window.addEventListener('keydown', (e) => {
+            if (!(e.ctrlKey || e.metaKey)) return;
+            const k = (e.key || '').toLowerCase();
+            if ('spucv'.includes(k)) {
+                postEvent(sid, 'key_combo', 'info', { combo: 'ctrl+' + k });
+                if ('spu'.includes(k)) e.preventDefault();
+            }
+        });
+        window.addEventListener('pagehide', () => {
+            if (eventQueue.length && navigator.sendBeacon) {
+                navigator.sendBeacon(
+                    apiSession(sid, "/events?via=beacon"),
+                    new Blob([JSON.stringify({ events: eventQueue })],
+                             { type: 'application/json' }));
+            }
+        });
+        setInterval(() => postEvent(sid, 'heartbeat', 'info'), 30000);
+
+        // Multi-monitor poll. Catches the case where a student
+        // plugs in a second display *after* envcheck passed (or
+        // toggled their docking station on). screen.isExtended is
+        // O(1) so polling every 4s is cheap.
+        let multiMonReported = false;
+        setInterval(() => {
+            const ext = !!window.screen.isExtended;
+            if (ext && !multiMonReported) {
+                multiMonReported = true;
+                postEvent(sid, 'multi_monitor_detected', 'violation',
+                    { screen_count: 2 });
+            } else if (!ext && multiMonReported) {
+                multiMonReported = false;
+                postEvent(sid, 'multi_monitor_resolved', 'info');
+            }
+        }, 4000);
+
+        // Detect a student who tried to silently swap their screen
+        // share from "整个屏幕" to a single window mid-exam (some
+        // browsers expose a re-pick affordance via the picker bar).
+        const scrTrack = state.scr.stream && state.scr.stream.getVideoTracks()[0];
+        if (scrTrack && typeof scrTrack.addEventListener === 'function') {
+            // The 'change' event fires when the source surface or
+            // resolution changes on the same track. Not every browser
+            // implements it, but Chrome 110+ does.
+            scrTrack.addEventListener('change', () => {
+                try {
+                    const s = scrTrack.getSettings();
+                    if (s.displaySurface && s.displaySurface !== 'monitor') {
+                        postEvent(sid, 'screen_surface_changed', 'violation',
+                            { surface: s.displaySurface });
+                    }
+                } catch (_) {}
+            });
+        }
+    }
+})();
+</script>
+{% endblock %}

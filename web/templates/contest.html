@@ -52,7 +52,18 @@
             <div class="card-group--small">
                 {%- for problem in my_data['problems'] -%}
                 {%- set j = loop.index0 -%}
-                <a class="card card--small {{ 'border-' + g.consts.judge_status_info[problem['status']].badge_type if problem['status'] is not None }}" href="{{ url_for('.problem', problem=contest.problems[j]) }}">
+                {%- set p = contest.problems[j] -%}
+                {%- if kiosk -%}
+                {# Kiosk mode: open the problem in an in-page iframe. Parent's
+                   proctor.js keeps recording uninterrupted. #}
+                <div class="card card--small {{ 'border-' + g.consts.judge_status_info[problem['status']].badge_type if problem['status'] is not None }} kiosk-problem-card"
+                     role="button" data-problem-id="{{ p.id }}"
+                     data-problem-title="{{ p.title }}"
+                     data-problem-index="{{ j + 1 }}"
+                     style="cursor:pointer">
+                {%- else -%}
+                <a class="card card--small {{ 'border-' + g.consts.judge_status_info[problem['status']].badge_type if problem['status'] is not None }}" href="{{ url_for('.problem', problem=p) }}">
+                {%- endif -%}
                     <div class="card-header">
                         <span>Problem {{ j + 1 }}</span>
                         {%- if problem['count'] + problem['pending_count'] > 0 -%}
@@ -65,26 +76,122 @@
                         {%- endif -%}
                     </div>
                     <div class="card-body">
-                        <span>{{ contest.problems[j].id }}. {{ contest.problems[j].title }}</span>
+                        <span>{{ p.id }}. {{ p.title }}</span>
+                        {%- if not kiosk -%}
                         <div class="float-right">
                             {%- if problem['count'] + problem['pending_count'] > 0 -%}
                             <form action="{{ url_for('.status') }}" class="d-inline">
-                                <input type="hidden" name="problem_id" value="{{ contest.problems[j].id }}">
+                                <input type="hidden" name="problem_id" value="{{ p.id }}">
                                 <input type="hidden" name="username" value="{{ g.user.username }}">
                                 <button class="btn btn-sm btn-outline-primary" type="submit">评测状态</button>
                             </form>
                             {%- endif -%}
                             {%- if g.time <= contest.end_time or (contest.late_submission_deadline is not None and g.time <= contest.late_submission_deadline) -%}
-                            <form action="{{ url_for('.problem_submit', problem=contest.problems[j]) }}" class="d-inline">
+                            <form action="{{ url_for('.problem_submit', problem=p) }}" class="d-inline">
                                 <button class="btn btn-sm btn-outline-primary" type="submit">提交</button>
                             </form>
                             {%- endif -%}
                         </div>
+                        {%- endif -%}
                     </div>
+                {%- if kiosk -%}
+                </div>
+                {%- else -%}
                 </a>
+                {%- endif -%}
                 {%- endfor -%}
             </div>
             <hr>
+            {%- endif -%}
+
+            {%- if kiosk -%}
+            {# In-page problem viewer for kiosk-mode contests. The iframe
+               loads /problem/<id>/submit and stays inside the contest page;
+               proctor.js running on this page continues uninterrupted. #}
+            <div id="kiosk-viewer" style="
+                display:none; position:fixed; inset:0;
+                background:#fff; z-index:1050;
+                flex-direction:column;">
+                <div style="
+                    padding:8px 16px; background:#e77c8e; color:#fff;
+                    display:flex; align-items:center; gap:12px; flex-shrink:0;">
+                    <strong id="kiosk-title">Problem</strong>
+                    <span class="ml-auto"></span>
+                    <style>
+                      #kiosk-close {
+                        background: rgba(255,255,255,.15);
+                        color: #fff;
+                        border: 1px solid rgba(255,255,255,.55);
+                        padding: 4px 14px;
+                        font-size: 13px; font-weight: 500;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+                        line-height: 1.5;
+                        outline: none;
+                      }
+                      #kiosk-close:hover {
+                        background: #fff; color: #c94e6d;
+                      }
+                      #kiosk-close:focus, #kiosk-close:active {
+                        outline: none;
+                        box-shadow: 0 0 0 2px rgba(255,255,255,.45);
+                      }
+                      #kiosk-close::-moz-focus-inner { border: 0; }
+                    </style>
+                    <button id="kiosk-close" type="button">← 返回比赛列表</button>
+                </div>
+                <iframe id="kiosk-frame" src="about:blank"
+                        allow="camera; microphone; display-capture; fullscreen; cross-origin-isolated"
+                        style="flex:1 1 auto; border:0; width:100%; height:100%"></iframe>
+            </div>
+            <script>
+            (function () {
+                const viewer = document.getElementById('kiosk-viewer');
+                const frame = document.getElementById('kiosk-frame');
+                const title = document.getElementById('kiosk-title');
+
+                // Tell the outer setup-page parent whether the
+                // student is on the problem list or inside a problem.
+                // The parent uses this to toggle the 交卷 button:
+                // only visible on the list, hidden inside problems.
+                function notifyParent(view) {
+                    try {
+                        window.parent.postMessage(
+                            { type: 'proctor:view', view: view }, '*');
+                    } catch (_) {}
+                }
+                notifyParent('list');
+
+                function showProblem(pid, ptitle, pidx) {
+                    title.textContent =
+                        'Problem ' + pidx + ' — ' + pid + '. ' + ptitle;
+                    frame.src = '/OnlineJudge/problem/' + pid + '/submit?kiosk=1';
+                    viewer.style.display = 'flex';
+                    notifyParent('problem');
+                }
+                function closeProblem() {
+                    frame.src = 'about:blank';
+                    viewer.style.display = 'none';
+                    notifyParent('list');
+                }
+
+                document.querySelectorAll('.kiosk-problem-card').forEach((el) => {
+                    el.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        showProblem(el.dataset.problemId, el.dataset.problemTitle,
+                                    el.dataset.problemIndex);
+                    });
+                });
+                document.getElementById('kiosk-close')
+                    .addEventListener('click', closeProblem);
+                // The inner problem_submit iframe postMessages here
+                // when the student clicks 返回题目列表.
+                window.addEventListener('message', (e) => {
+                    if (e.data && e.data.type === 'proctor:back') closeProblem();
+                });
+            })();
+            </script>
             {%- endif -%}
 
             <h4>{{ '排行榜' if contest.ranked else '完成情况' }}</h4>

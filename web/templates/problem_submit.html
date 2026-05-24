@@ -12,12 +12,17 @@
 </head>
 <body>
 <div class="ide">
+    {%- if not kiosk -%}
+    {# In kiosk mode the contest's iframe wrapper already shows the
+       problem title + a 「返回题目列表」 button at the top — rendering
+       another header here would double up. Skip it entirely. #}
     <header class="ide__top">
         <a class="ide__back" href="{{ url_for('web.problem', problem=problem) }}">&larr; 返回题目</a>
         <span class="ide__title">{{ problem.id }}. {{ problem.title }}</span>
         <span class="ide__top-spacer"></span>
         <span class="ide__hint">代码自动暂存于本地</span>
     </header>
+    {%- endif -%}
 
     <div class="ide__body" id="ide-body">
         <!-- ===== left: problem statement ===== -->

@@ -12,7 +12,7 @@ until mc alias set local "${MINIO_URL}" "${MINIO_USER}" "${MINIO_PASS}" >/dev/nu
 done
 echo "[minio-init] MinIO is up."
 
-for bucket in oj-problems oj-submissions oj-artifacts oj-images oj-attachments; do
+for bucket in oj-problems oj-submissions oj-artifacts oj-images oj-attachments oj-proctoring; do
     mc mb --ignore-existing "local/${bucket}"
     echo "[minio-init] bucket ready: ${bucket}"
 done

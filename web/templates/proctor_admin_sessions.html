@@ -1,0 +1,89 @@
+{% extends 'base.html' %}
+{% set page = '监考会话 · ' + contest.name %}
+
+{% block content %}
+<div class="card card-body">
+    <h1 class="title-nav">
+        <span class="title-nav__title">{{ contest.name }} — 监考会话</span>
+        <span class="title-nav__nav btn-group--title-nav">
+            <a href="{{ url_for('.problemset_admin', contest=contest) }}" class="btn btn-outline-primary">返回管理</a>
+            <a href="{{ url_for('.problemset', contest=contest) }}" class="btn btn-outline-primary">返回比赛</a>
+        </span>
+    </h1>
+    <hr>
+
+    {%- if sessions | length == 0 -%}
+    <p class="text-muted">暂无监考会话。学生进入比赛后会自动产生记录。</p>
+    {%- else -%}
+    <div class="table-responsive">
+        <table class="table table-striped table-hover">
+            <thead>
+                <tr>
+                    <th>会话</th>
+                    <th>学生</th>
+                    <th>开始</th>
+                    <th>结束</th>
+                    <th>状态</th>
+                    <th class="text-right">切屏</th>
+                    <th class="text-right">违规</th>
+                    <th>录像</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {%- for s in sessions -%}
+                {%- set u = user_by_id.get(s.user_id) -%}
+                <tr>
+                    <td>#{{ s.id }}</td>
+                    <td>
+                        {%- if u -%}
+                        {{ u.friendly_name }} <small class="text-muted">({{ u.username }})</small>
+                        {%- else -%}<span class="text-muted">用户已删除</span>{%- endif -%}
+                    </td>
+                    <td><small>{{ g.utils.readable_time(s.started_at) }}</small></td>
+                    <td><small>{{ g.utils.readable_time(s.ended_at) if s.ended_at else '—' }}</small></td>
+                    <td>
+                        {%- if s.status == 'active' -%}
+                        <span class="badge badge-primary">进行中</span>
+                        {%- elif s.status == 'ended' -%}
+                        <span class="badge badge-success">已结束</span>
+                        {%- else -%}
+                        <span class="badge badge-warning">{{ s.status }}</span>
+                        {%- endif -%}
+                    </td>
+                    <td class="text-right">
+                        {%- if s.tab_switch_count > 0 -%}
+                        <strong class="{{ 'text-danger' if s.tab_switch_count >= 5 else 'text-warning' }}">
+                            {{ s.tab_switch_count }}
+                        </strong>
+                        {%- else -%}0{%- endif -%}
+                    </td>
+                    <td class="text-right">
+                        {%- if s.violation_count > 0 -%}
+                        <strong class="text-danger">{{ s.violation_count }}</strong>
+                        {%- else -%}0{%- endif -%}
+                    </td>
+                    <td>
+                        {%- if s.screen_object_key -%}<span class="badge badge-light">屏幕</span> {% endif -%}
+                        {%- if s.camera_object_key -%}<span class="badge badge-light">摄像头</span>{% endif -%}
+                    </td>
+                    <td>
+                        <a href="{{ url_for('.proctor_admin_session_detail', contest=contest, sid=s.id) }}"
+                           class="btn btn-sm btn-outline-primary">详情</a>
+                        {%- if s.status in ('ended', 'aborted') -%}
+                        <form method="post" class="d-inline"
+                              action="{{ url_for('.proctor_admin_session_reopen', contest=contest, sid=s.id) }}"
+                              onsubmit="return confirm('确认让 {{ (user_by_id.get(s.user_id).username if user_by_id.get(s.user_id) else '该用户') }} 重新进入本场比赛？\n该会话将恢复 active 状态，违规计数与已录制片段保留。');">
+                            {{ g.csrf() }}
+                            <button type="submit" class="btn btn-sm btn-outline-warning">续考</button>
+                        </form>
+                        {%- endif -%}
+                    </td>
+                </tr>
+                {%- endfor -%}
+            </tbody>
+        </table>
+    </div>
+    {%- endif -%}
+</div>
+{% endblock %}

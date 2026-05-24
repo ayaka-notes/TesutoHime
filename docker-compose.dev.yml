@@ -10,8 +10,8 @@
 #   - Mounts ./web ./commons ./scripts ./alembic into the web container
 #     so the Flask dev server auto-reloads on edit.
 #   - Switches the web entrypoint to the dev server (templates auto-reload).
-#   - Spins up a second judger replica so you can watch the scheduler
-#     distribute work across a pool.
+#   - Keeps all service ports published to localhost for direct hit
+#     (matches the base file; the prod compose hides them behind nginx).
 
 services:
   web:
@@ -26,6 +26,16 @@ services:
       - 'pip install -q -r /app/web/requirements.txt && exec python -m web.main'
     environment:
       ENV: development
+      # Browser-facing URLs are rewritten to flow through the unified
+      # ``gateway-dev`` (port 8088) so dev exercises the same network
+      # path as prod — single host, single TLS terminator, websocket
+      # upgrade through nginx. The base file still publishes the
+      # individual service ports (5080 / 7880 / 5300 / 9000) for
+      # direct hits when you're debugging.
+      LIVEKIT_URL:        "ws://localhost:8088/livekit"
+      PROCTOR_PUBLIC_URL: "http://localhost:8088/proctor2"
+      S3_PUBLIC_URL:      "http://localhost:8088/s3/"
+      S3_PUBLIC_ENDPOINT: "http://localhost:8088/s3/"
     volumes:
       - ./web:/app/web
       - ./commons:/app/commons
@@ -57,3 +67,23 @@ services:
       minio-init:
         condition: service_completed_successfully
     restart: unless-stopped
+
+  # Single-port reverse proxy for dev. Mirrors the prod gateway layout
+  # so frontend code that uses relative paths (``/livekit/``, ``/s3/``,
+  # ``/proctor2/``) works the same here as in prod. Direct ports
+  # (5080 / 7880 / 5300 / 9000) are still published by the base file
+  # for ad-hoc debugging.
+  gateway-dev:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      # 8080 is commonly grabbed by other local services — 8088 is
+      # almost always free.
+      - "8088:80"
+    volumes:
+      - ./docker/nginx/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - web
+      - livekit
+      - proctor2
+      - minio

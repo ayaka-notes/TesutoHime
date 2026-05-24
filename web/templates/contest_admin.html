@@ -326,6 +326,71 @@
     </form>
     <hr>
 
+    <h3 class="d-flex align-items-center">
+        在线监考
+        {%- set pcfg = contest.proctor_config or {} -%}
+        {%- if pcfg -%}
+        <span class="badge badge-primary ml-2">已启用</span>
+        {%- else -%}
+        <span class="badge badge-secondary ml-2">未启用</span>
+        {%- endif -%}
+    </h3>
+    <p class="text-muted">启用后,学生进入比赛前需要授权摄像头/屏幕共享。考试期间持续录制并记录切屏行为。</p>
+    <form method="POST" action="{{ url_for('.proctor_admin_save', contest=contest) }}">
+        {{ g.csrf() }}
+        <div class="form-row">
+            <div class="col-md-3">
+                <div class="custom-control custom-checkbox mb-2">
+                    <input class="custom-control-input" type="checkbox" name="require_envcheck" id="proctor-envchk"{{ ' checked' if pcfg.get('require_envcheck', True) }}>
+                    <label class="custom-control-label" for="proctor-envchk" title="关闭后跳过 VM / 远程桌面 / 软件渲染等环境检测。仅用于开发或调试,生产环境不要关。">环境检查</label>
+                </div>
+                <div class="custom-control custom-checkbox mb-2">
+                    <input class="custom-control-input" type="checkbox" name="require_camera" id="proctor-cam"{{ ' checked' if pcfg.get('require_camera') }}>
+                    <label class="custom-control-label" for="proctor-cam">要求摄像头</label>
+                </div>
+                <div class="custom-control custom-checkbox mb-2">
+                    <input class="custom-control-input" type="checkbox" name="require_mic" id="proctor-mic"{{ ' checked' if pcfg.get('require_mic') }}>
+                    <label class="custom-control-label" for="proctor-mic">要求麦克风</label>
+                </div>
+                <div class="custom-control custom-checkbox mb-2">
+                    <input class="custom-control-input" type="checkbox" name="require_screen" id="proctor-scr"{{ ' checked' if pcfg.get('require_screen', True) }}>
+                    <label class="custom-control-label" for="proctor-scr">要求屏幕共享</label>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="custom-control custom-checkbox mb-2">
+                    <input class="custom-control-input" type="checkbox" name="record_camera" id="proctor-rec-cam"{{ ' checked' if pcfg.get('record_camera', True) }}>
+                    <label class="custom-control-label" for="proctor-rec-cam">录制摄像头</label>
+                </div>
+                <div class="custom-control custom-checkbox mb-2">
+                    <input class="custom-control-input" type="checkbox" name="record_screen" id="proctor-rec-scr"{{ ' checked' if pcfg.get('record_screen', True) }}>
+                    <label class="custom-control-label" for="proctor-rec-scr">录制屏幕</label>
+                </div>
+                <div class="custom-control custom-checkbox mb-2">
+                    <input class="custom-control-input" type="checkbox" name="fullscreen_required" id="proctor-fs"{{ ' checked' if pcfg.get('fullscreen_required', True) }}>
+                    <label class="custom-control-label" for="proctor-fs">强制全屏</label>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <label for="proctor-max-switch" class="small">切屏次数上限(留空=不警告)</label>
+                <input class="form-control" type="number" min="0" name="max_tab_switches"
+                       id="proctor-max-switch"
+                       value="{{ pcfg.get('max_tab_switches') if pcfg.get('max_tab_switches') is not none }}">
+            </div>
+        </div>
+        <div class="mt-3 d-flex flex-wrap" style="gap: .5rem">
+            {%- if pcfg -%}
+            <button class="btn btn-outline-danger" type="submit" name="action" value="disable">关闭监考</button>
+            {%- endif -%}
+            <button class="btn btn-outline-primary" type="submit">保存</button>
+            {%- if pcfg -%}
+            <a href="{{ url_for('.proctor_admin_live', contest=contest) }}" class="btn btn-outline-primary">实时巡视</a>
+            <a href="{{ url_for('.proctor_admin_sessions', contest=contest) }}" class="btn btn-outline-primary">历史会话与录像</a>
+            {%- endif -%}
+        </div>
+    </form>
+    <hr>
+
     <h3>创建比赛副本</h3>
     <p>这将会创建一个新的比赛，并复制此比赛的所有设置。稍后您将跳转到新创建的比赛。请在下方文本框中输入 <code>duplicate</code> 以确认：</p>
     <form method="POST">

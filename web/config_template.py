@@ -37,6 +37,7 @@ class S3Config:
         submissions = 'oj-submissions'
         images = 'oj-images'
         attachments = 'oj-attachments'
+        proctoring = 'oj-proctoring'
 
 
 class LoginConfig:                        #登录过期时间，单位s
@@ -59,6 +60,33 @@ class SchedulerConfig:
 class CustomRunConfig:
     # Base URL of the judger's custom-run service (web IDE "self-test").
     base_url = 'http://localhost:5200'
+
+
+class ProctorConfig:
+    # Base URL of the proctor2 aggregation service. Browsers POST media
+    # chunks straight to this host; web/web.py only handles control plane
+    # (start/end/event/finalize). For local dev both web and proctor2 run
+    # on the host machine.
+    base_url = 'http://localhost:5300'
+    # Public URL the browser uses to reach proctor2 — must match the host
+    # the student's machine actually resolves; in production this usually
+    # routes through the same reverse-proxy as /OnlineJudge/.
+    public_url = 'http://localhost:5300'
+    # Shared secret used by web -> proctor2 finalize/cleanup calls. The
+    # browser-facing endpoints authenticate via a per-session token issued
+    # by the web side at session start.
+    internal_auth = 'Bearer oj-internal-secret'
+
+
+class LiveKitConfig:
+    """LiveKit SFU coordinates. Browsers connect to ``url`` (ws:// or
+    wss:// in production); the web server signs short-lived JWTs with
+    ``api_key`` + ``api_secret`` so each session can publish/subscribe
+    within its contest's room. Rotate the secret on every deploy.
+    """
+    url = 'ws://localhost:7880'
+    api_key = 'oj_proctor_key'
+    api_secret = 'oj_proctor_secret_change_me_before_production_xxxxxxxxxxxxxxxxxxxx'
 
 class JudgeConfig:
     Judge_Each_Page = 15                  #评测详情界面每页显示多少题目

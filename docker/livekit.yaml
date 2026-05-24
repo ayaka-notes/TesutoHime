@@ -1,0 +1,29 @@
+# LiveKit SFU configuration for the TesutoHime monitoring stack.
+#
+# Local dev keys — burn them before production. Generate replacements
+# with `livekit-server generate-keys` and inject via LIVEKIT_KEYS env.
+port: 7880
+bind_addresses:
+  - ''
+rtc:
+  # UDP media port range. Must be reachable from the browser; in docker
+  # we publish 50000-50299 to leave headroom for ~200 concurrent
+  # publishers without ICE port exhaustion.
+  port_range_start: 50000
+  port_range_end: 50999
+  tcp_port: 7881
+  # VSCode / SSH port-forwarding tunnels TCP only. Pin candidates to
+  # 127.0.0.1 so the browser (which sees localhost through the
+  # tunnel) connects via the forwarded TCP port 7881 when UDP is
+  # blocked. For real deployments behind a reverse proxy, replace
+  # with ``use_external_ip: true`` or the server's public IP.
+  use_external_ip: false
+  node_ip: '127.0.0.1'
+
+# API keys. Single key/secret for the whole school deployment; cross-
+# contest isolation is enforced at the room name level (room = contest:<id>).
+keys:
+  oj_proctor_key: oj_proctor_secret_change_me_to_64_chars_long_random_string_xxxxxxxxxxx
+
+# Logging
+log_level: info

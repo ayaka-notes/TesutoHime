@@ -1,0 +1,136 @@
+{% extends 'base.html' %}
+{% set page = '监考会话 #' + session.id|string %}
+
+{% block content %}
+<div class="card card-body">
+    <h1 class="title-nav">
+        <span class="title-nav__title">监考会话 #{{ session.id }}</span>
+        <span class="title-nav__nav btn-group--title-nav">
+            <a href="{{ url_for('.proctor_admin_sessions', contest=contest) }}" class="btn btn-outline-primary">返回列表</a>
+        </span>
+    </h1>
+    <hr>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <h4>基本信息</h4>
+            <table class="table table-sm">
+                <tr><td>比赛</td><td><a href="{{ url_for('.problemset', contest=contest) }}">{{ contest.name }}</a></td></tr>
+                <tr><td>学生</td>
+                    <td>{%- if user -%}
+                        {{ user.friendly_name }} <small class="text-muted">({{ user.username }})</small>
+                    {%- else -%}用户已删除{%- endif -%}</td></tr>
+                <tr><td>开始时间</td><td>{{ g.utils.readable_time(session.started_at) }}</td></tr>
+                <tr><td>结束时间</td><td>{{ g.utils.readable_time(session.ended_at) if session.ended_at else '—' }}</td></tr>
+                <tr><td>状态</td>
+                    <td>{%- if session.status == 'active' -%}
+                        <span class="badge badge-primary">进行中</span>
+                    {%- elif session.status == 'ended' -%}
+                        <span class="badge badge-success">已结束</span>
+                    {%- else -%}
+                        <span class="badge badge-warning">{{ session.status }}</span>
+                    {%- endif -%}</td></tr>
+                <tr><td>切屏次数</td><td>
+                    {%- if session.tab_switch_count > 0 -%}
+                    <strong class="{{ 'text-danger' if session.tab_switch_count >= 5 else 'text-warning' }}">{{ session.tab_switch_count }}</strong>
+                    {%- else -%}0{%- endif -%}
+                </td></tr>
+                <tr><td>违规次数</td><td>
+                    {%- if session.violation_count > 0 -%}
+                    <strong class="text-danger">{{ session.violation_count }}</strong>
+                    {%- else -%}0{%- endif -%}
+                </td></tr>
+            </table>
+        </div>
+        <div class="col-md-6">
+            <h4>客户端信息</h4>
+            {%- if session.client_meta -%}
+            <pre class="bg-light p-2 small" style="max-height:160px;overflow:auto">{{ session.client_meta | tojson(indent=2) }}</pre>
+            {%- else -%}<p class="text-muted">无</p>{%- endif -%}
+        </div>
+    </div>
+
+    {%- set has_video = video_segments and (video_segments.screen or video_segments.camera) -%}
+    {%- if has_video -%}
+    <h4>录像回放</h4>
+    <p class="text-muted small">如果本场比赛期间学生有断线重连,录像会分段保存,每段是一次连续录制。</p>
+    {%- for kind, label, ratio in [('screen','屏幕','16/9'), ('camera','摄像头','4/3')] -%}
+    {%- set segs = video_segments.get(kind) or [] -%}
+    {%- if segs -%}
+    <h6 class="mt-3 text-muted">{{ label }} · {{ segs | length }} 段</h6>
+    <div class="row">
+        {%- for s in segs -%}
+        <div class="col-md-6 mb-3">
+            <div class="small text-muted mb-1">
+                段 #{{ s.segment }}{%- if s.bytes -%} · {{ (s.bytes/1024/1024)|round(1) }} MiB{%- endif -%}
+            </div>
+            <video controls preload="metadata" class="w-100 bg-dark rounded"
+                   src="{{ s.url }}" style="aspect-ratio:{{ ratio }}"></video>
+        </div>
+        {%- endfor -%}
+    </div>
+    {%- endif -%}
+    {%- endfor -%}
+    <hr>
+    {%- elif session.status == 'ended' -%}
+    <div class="alert alert-warning">本场录像可能上传失败或被禁用。</div>
+    {%- endif -%}
+
+    {%- if snapshots and (snapshots.screen or snapshots.camera) -%}
+    <h4>截图证据</h4>
+    <p class="text-muted small">每 30 秒一帧。点击放大;鼠标悬停看时间。</p>
+    {%- for kind, items in snapshots.items() -%}
+    {%- if items -%}
+    <h6 class="mt-3 text-muted">{{ '屏幕' if kind == 'screen' else '摄像头' }} · {{ items|length }} 张</h6>
+    <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px;">
+        {%- for s in items -%}
+        <a href="{{ s.url }}" target="_blank"
+           title="{{ g.utils.readable_time(s.ts) if s.ts else s.key }}">
+            <img src="{{ s.url }}" loading="lazy"
+                 style="width:100%; aspect-ratio:16/9; object-fit:cover;
+                        border:1px solid #dee2e6; border-radius:3px;
+                        background:#000;">
+        </a>
+        {%- endfor -%}
+    </div>
+    {%- endif -%}
+    {%- endfor -%}
+    <hr>
+    {%- endif -%}
+
+    <h4>事件流</h4>
+    <p class="text-muted small">最多显示最近 500 条事件,按时间倒序排列。</p>
+    {%- if events | length == 0 -%}
+    <p class="text-muted">暂无事件。</p>
+    {%- else -%}
+    <div class="table-responsive">
+        <table class="table table-sm table-hover">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>级别</th>
+                    <th>详情</th>
+                </tr>
+            </thead>
+            <tbody>
+                {%- for e in events -%}
+                <tr class="{{ 'table-danger' if e.severity == 'violation' else ('table-warning' if e.severity == 'warning' else '') }}">
+                    <td><small>{{ g.utils.readable_time(e.occurred_at) }}</small></td>
+                    <td><code>{{ e.event_type }}</code></td>
+                    <td>
+                        {%- if e.severity == 'violation' -%}<span class="badge badge-danger">违规</span>
+                        {%- elif e.severity == 'warning' -%}<span class="badge badge-warning">警告</span>
+                        {%- else -%}<span class="badge badge-light">信息</span>{%- endif -%}
+                    </td>
+                    <td><small class="text-muted">
+                        {%- if e.detail -%}{{ e.detail | tojson }}{%- endif -%}
+                    </small></td>
+                </tr>
+                {%- endfor -%}
+            </tbody>
+        </table>
+    </div>
+    {%- endif -%}
+</div>
+{% endblock %}

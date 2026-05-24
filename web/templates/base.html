@@ -18,7 +18,18 @@
     <link href="{{ url_for('.static', filename = 'dark.css') }}?v=20250106" rel="stylesheet">
 </head>
 
-<body class="bg-secondary">
+<body class="bg-secondary{% if kiosk %} proctor-kiosk{% endif %}">
+    {% if kiosk %}
+    <style>
+        /* Kiosk mode: student is inside a proctored exam. Hide every
+         * way to navigate off the contest page — top nav, footer,
+         * external links — so the only choices are "answer a
+         * problem" or "end the exam". */
+        body.proctor-kiosk > nav.navbar { display: none !important; }
+        body.proctor-kiosk > .footer { display: none !important; }
+        body.proctor-kiosk a[href]:not([data-kiosk-allow]):not([href^="#"]) { pointer-events: none; color: inherit; }
+    </style>
+    {% endif %}
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary py-2 mb-3">
         <div class="container">
             <a class="navbar-brand" href="{{ url_for('web.index') }}">ACM Class OnlineJudge</a>
@@ -103,5 +114,12 @@
     <script src="{{ url_for('.static', filename = 'lib/han.min.js') }}?v=20260209"></script>
     <script src="{{ url_for('.static', filename = 'js/base.js') }}?v=20240214"></script>
     {% block script %}{% endblock %}
+    {%- if g.proctor_ctx -%}
+    <script>
+        window.PROCTOR_BOOT = {{ g.proctor_ctx | tojson }};
+    </script>
+    <script src="{{ url_for('.static', filename = 'js/proctor-envcheck.js') }}?v=20260523"></script>
+    <script src="{{ url_for('.static', filename = 'js/proctor.js') }}?v=20260523"></script>
+    {%- endif -%}
 </body>
 </html>

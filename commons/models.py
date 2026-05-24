@@ -287,6 +287,18 @@ class Contest(UseTimestamps, Base):
     completion_criteria: Mapped[Optional[str]]
     allowed_languages: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text))
 
+    # Proctoring config (per-contest). When NULL the contest is unproctored.
+    # Recognised keys (all optional, all bool unless noted):
+    #   require_camera, require_mic, require_screen — media tracks the
+    #     student must grant before entering the exam.
+    #   record_camera, record_screen — whether MediaRecorder uploads chunks
+    #     for that track (defaults to the corresponding require_* flag).
+    #   fullscreen_required — keep the page in fullscreen during the exam.
+    #   max_tab_switches (int|null) — warn the student after this many
+    #     visibility-loss events; null disables the warning threshold but
+    #     still records every event.
+    proctor_config: Mapped[Optional[Any]] = mapped_column(JSONB)
+
     external_players: Mapped[Set[User]] = relationship(
         secondary='contest_player',
         passive_deletes=True,
@@ -311,6 +323,49 @@ class ContestProblem(UseTimestamps, Base):
     id: Mapped[intpk]
     contest_id: Mapped[contest_fk]
     problem_id: Mapped[problem_fk]
+
+
+class ContestProctorSession(UseTimestamps, Base):
+    """One proctoring attempt by a user on a contest.
+
+    A user may have at most one *active* session per contest at a time
+    (enforced in the blueprint, not the schema, so admins can reset).
+    Object keys point into the oj-proctoring bucket.
+    """
+    id: Mapped[intpk]
+    contest_id: Mapped[contest_fk]
+    user_id: Mapped[user_fk]
+    started_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    ended_at: Mapped[Optional[datetime]]
+    # 'active' | 'ended' | 'aborted'
+    status: Mapped[str] = mapped_column(server_default='active')
+    tab_switch_count: Mapped[int] = mapped_column(server_default=text('0'))
+    violation_count: Mapped[int] = mapped_column(server_default=text('0'))
+    screen_object_key: Mapped[Optional[str]]
+    camera_object_key: Mapped[Optional[str]]
+    client_meta: Mapped[Optional[Any]] = mapped_column(JSONB)
+
+
+proctor_session_fk = Annotated[int, mapped_column(
+    ForeignKey(ContestProctorSession.id, ondelete='CASCADE'), index=True)]
+
+
+class ContestProctorEvent(Base):
+    """Append-only stream of proctoring events.
+
+    severity:
+      'info'      — informational (e.g. ctrl-s, mouse-leave)
+      'warning'   — soft violation worth showing the user (e.g. blur)
+      'violation' — hard violation (visibility hidden, fullscreen exited)
+    event_type is free-form but populated by proctor.js with a fixed set.
+    """
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    session_id: Mapped[proctor_session_fk]
+    occurred_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    event_type: Mapped[str]
+    severity: Mapped[str] = mapped_column(server_default='info')
+    detail: Mapped[Optional[Any]] = mapped_column(JSONB)
 
 
 class Discussion(UseTimestamps, Base):

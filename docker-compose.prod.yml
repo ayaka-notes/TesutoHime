@@ -1,0 +1,76 @@
+# Production overrides — explicitly opt-in.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# How this differs from the base file:
+#   - Adds an ``nginx`` gateway that fronts every HTTP/WS service.
+#   - Removes the ``ports:`` mapping from web / proctor2 / minio / livekit-7880
+#     so the only TCP port reachable from outside is :443 (nginx).
+#   - Keeps the LiveKit media ports exposed:
+#       * 7881/tcp  — TCP media fallback when UDP is blocked
+#       * 50000-50999/udp — primary realtime WebRTC media
+#     because these protocols cannot be tunneled through HTTPS.
+#   - Points every browser-visible URL at the gateway domain via env.
+#
+# Required before ``up``:
+#   1. Put TLS certs at ./docker/nginx/certs/{fullchain.pem,privkey.pem}
+#   2. Edit the ``PUBLIC_HOST`` env vars at the bottom of this file to
+#      the public hostname the gateway answers on (e.g. exam.example.com).
+#   3. Rotate the placeholder LiveKit API key / secret in
+#      ./docker/livekit.yaml.
+
+services:
+  # ------------- gateway -----------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"     # HTTP → HTTPS redirect + ACME http-01
+      - "443:443"   # TLS terminator for everything
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/certs:/etc/nginx/certs:ro
+      - nginx-acme:/var/www/acme
+      - nginx-logs:/var/log/nginx
+    depends_on:
+      - web
+      - livekit
+      - proctor2
+      - minio
+    networks:
+      - default
+
+  # ------------- web ---------------------------------------------------
+  web:
+    ports: !reset []   # remove "5080:5000" from base
+    environment:
+      ENV: production
+      # All public URLs point at the gateway. Override PUBLIC_HOST in
+      # your shell or .env file before bringing the stack up.
+      S3_PUBLIC_URL:      https://${PUBLIC_HOST:?must set PUBLIC_HOST}/s3/
+      S3_PUBLIC_ENDPOINT: https://${PUBLIC_HOST}/s3/
+      PROCTOR_PUBLIC_URL: https://${PUBLIC_HOST}/proctor2
+      LIVEKIT_URL:        wss://${PUBLIC_HOST}/livekit
+
+  # ------------- proctor2 ----------------------------------------------
+  proctor2:
+    ports: !reset []   # remove "5300:5300"
+
+  # ------------- livekit -----------------------------------------------
+  livekit:
+    ports: !override
+      # Signaling is fronted by nginx; do NOT republish 7880 directly.
+      - "7881:7881"                          # TCP media fallback
+      - "50000-50999:50000-50999/udp"        # UDP media
+
+  # ------------- minio -------------------------------------------------
+  minio:
+    ports: !reset []   # remove "9000:9000" + "9001:9001"
+    # The console (9001) is reachable only through ``docker exec`` /
+    # SSH tunnel in prod. If you need it externally, add an admin VPN
+    # route, do NOT expose it on the gateway.
+
+volumes:
+  nginx-acme:
+  nginx-logs:
