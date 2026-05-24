@@ -326,9 +326,11 @@
             const cfg = await r.json();
             const { Room, RoomEvent, Track } = LivekitClient;
             lkRoom = new Room({
-                // We're displaying small thumbnails — opt into the
-                // lowest simulcast layer to keep admin bandwidth low.
-                adaptiveStream: true,
+                // adaptiveStream auto-downscales based on the <video>
+                // element's rendered size; that's fine for cameras
+                // but turns screen-share text into a blurry mess in
+                // small thumbnails. Off here -> raw publish layer.
+                adaptiveStream: false,
                 dynacast: true,
             });
             // Helper: route an incoming track to the right card.
@@ -358,12 +360,16 @@
                 if (v) {
                     track.attach(v);
                     v.play().catch(() => {});
-                    // Drop the visual-quality to the lowest simulcast
-                    // layer so admin saves bandwidth on thumbnails.
-                    try {
-                        publication.setVideoQuality &&
-                            publication.setVideoQuality(LivekitClient.VideoQuality.LOW);
-                    } catch (_) {}
+                    // Screen tracks carry exam text — pin HIGH so the
+                    // admin can actually read it. Cameras are already
+                    // 320×240 single-layer at the source so LOW vs
+                    // HIGH doesn't really differ; leave it adaptive.
+                    if (kindKey === 'screen') {
+                        try {
+                            publication.setVideoQuality &&
+                                publication.setVideoQuality(LivekitClient.VideoQuality.HIGH);
+                        } catch (_) {}
+                    }
                 }
                 empty && empty.classList.add('hidden');
             }
