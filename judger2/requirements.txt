@@ -2,3 +2,8 @@ aiohttp==3.11.16
 pyyaml==6.0.1
 redis==4.6.0
 typing_extensions==4.9.0
+# Used only by docker/judger-entrypoint.sh to self-register the runner
+# into judge_runner_v2 on container start; the judger itself talks to
+# the OJ over Redis, not SQL.
+sqlalchemy==2.0.41
+psycopg2-binary==2.9.10
