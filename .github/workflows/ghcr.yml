@@ -1,0 +1,93 @@
+# Build the four service images and push them to GHCR on every commit
+# to master (and on manual dispatch). Image tag is derived from the
+# commit's author time in Asia/Shanghai, e.g. ``20250524-1127``, so the
+# tag tracks the actual content of the commit, not the time the runner
+# happened to start.
+name: Build & push GHCR images
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# GITHUB_TOKEN needs ``packages: write`` to push to ghcr.io.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Compute the timestamp tag once and fan out, so every image in the
+  # matrix gets the same tag for a given commit.
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      owner_lc: ${{ steps.owner.outputs.owner_lc }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        name: Compute YYYYMMDD-HHMM tag from commit time
+        run: |
+          # author-date in Asia/Shanghai. format-local respects $TZ.
+          TS=$(TZ=Asia/Shanghai git show -s --date=format-local:%Y%m%d-%H%M --format=%cd HEAD)
+          echo "tag=$TS" | tee -a "$GITHUB_OUTPUT"
+      - id: owner
+        name: Lowercase the org name for GHCR
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lc=$OWNER_LC" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: build-${{ matrix.service.name }}
+    runs-on: ubuntu-latest
+    needs: meta
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - { name: web,       dockerfile: docker/Dockerfile.web,       needs_lfs: true }
+          - { name: scheduler, dockerfile: docker/Dockerfile.scheduler, needs_lfs: false }
+          - { name: proctor2,  dockerfile: docker/Dockerfile.proctor2,  needs_lfs: false }
+          - { name: judger,    dockerfile: docker/Dockerfile.judger,    needs_lfs: false }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Only the web image bundles the vendored clangd.wasm (tracked
+          # via LFS). Skipping LFS on the other matrix jobs saves the
+          # repo's monthly LFS bandwidth quota.
+          lfs: ${{ matrix.service.needs_lfs }}
+
+      - name: Free disk space before heavy build
+        # The judger image installs Nix + builds nsjail; the default GH
+        # runner has only ~14 GB free, which is not enough. Drop the
+        # bundled Android / .NET / Haskell / large CLIs to claw back ~30 GB.
+        if: matrix.service.name == 'judger'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push ${{ matrix.service.name }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.service.dockerfile }}
+          push: true
+          tags: |
+            ghcr.io/${{ needs.meta.outputs.owner_lc }}/tesutohime-${{ matrix.service.name }}:${{ needs.meta.outputs.tag }}
+            ghcr.io/${{ needs.meta.outputs.owner_lc }}/tesutohime-${{ matrix.service.name }}:latest
+          # Per-service cache scope so a change in one Dockerfile doesn't
+          # invalidate the others.
+          cache-from: type=gha,scope=${{ matrix.service.name }}
+          cache-to:   type=gha,scope=${{ matrix.service.name }},mode=max
