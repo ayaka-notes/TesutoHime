@@ -556,6 +556,10 @@
       cameraStream = newCam;
       screenStream = newScr;
       await startRecorders(cameraStream, screenStream);
+      // Re-publish to LiveKit with the fresh tracks; cheaper than
+      // diffing individual track replacements and avoids the corner
+      // case where a track id changed but the device is the same.
+      publishToLiveKit().catch(() => {});
       // Swap remote-view tracks live if an admin is currently watching.
       if (livePeer && livePeer.connectionState !== 'closed') {
         const senders = livePeer.getSenders();
@@ -660,6 +664,8 @@
       });
     }
     await startRecorders(cameraStream, screenStream);
+    // Best-effort: also join the LiveKit room so admins can watch live.
+    publishToLiveKit().catch(() => {});
     if (fullscreenWanted) await requestFullscreen();
 
     // Small floating camera preview in the corner so the student can
@@ -997,6 +1003,80 @@
       // EventSource auto-reconnects; on persistent failure (session
       // ended, for example) we just give up silently.
     };
+  }
+
+  // -------------------------- LiveKit SFU publish ---------------------
+  //
+  // The admin live page subscribes to the LiveKit room ``contest:<id>``
+  // and renders one tile per publisher. Without this code path no one
+  // ever joins that room and the dashboard stays black. We mirror the
+  // tracks the recorder already holds (cameraStream + screenStream).
+  let lkRoom = null;
+  let lkClientPromise = null;
+
+  function loadLiveKitClient() {
+    if (window.LivekitClient) return Promise.resolve(window.LivekitClient);
+    if (lkClientPromise) return lkClientPromise;
+    lkClientPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/livekit-client@2.5.10/dist/livekit-client.umd.min.js';
+      s.onload = () => resolve(window.LivekitClient);
+      s.onerror = (e) => reject(new Error('livekit-client CDN load failed'));
+      document.head.appendChild(s);
+    });
+    return lkClientPromise;
+  }
+
+  async function publishToLiveKit() {
+    if (!BOOT.livekit_url) return;
+    const tokenUrl = urlFor('livekit_token_url');
+    if (!tokenUrl) return;
+    try {
+      const lk = await loadLiveKitClient();
+      // Fresh publisher token; the server signs it for canPublish=true.
+      const tokResp = await fetch(tokenUrl, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-Acmoj-Is-Csrf': 'no' },
+      });
+      if (!tokResp.ok) throw new Error('token http ' + tokResp.status);
+      const tokJson = await tokResp.json();
+      const token = tokJson.token;
+      const wsUrl = tokJson.url || BOOT.livekit_url;
+      if (lkRoom) { try { await lkRoom.disconnect(); } catch (_) {} lkRoom = null; }
+      lkRoom = new lk.Room({
+        adaptiveStream: true,
+        dynacast: true,
+        publishDefaults: { simulcast: false },
+      });
+      await lkRoom.connect(wsUrl, token);
+      // Publish every active track from both streams. Tagging the
+      // ``source`` field lets the admin tile pick the right thumbnail.
+      const pubs = [];
+      if (cameraStream) {
+        for (const t of cameraStream.getTracks()) {
+          pubs.push(lkRoom.localParticipant.publishTrack(t, {
+            source: t.kind === 'video' ? lk.Track.Source.Camera : lk.Track.Source.Microphone,
+            simulcast: false,
+          }));
+        }
+      }
+      if (screenStream) {
+        for (const t of screenStream.getTracks()) {
+          pubs.push(lkRoom.localParticipant.publishTrack(t, {
+            source: lk.Track.Source.ScreenShare,
+            simulcast: false,
+          }));
+        }
+      }
+      await Promise.all(pubs);
+    } catch (e) {
+      // Non-fatal: chunk uploads + mesh fallback still work; we just
+      // won't be in the LiveKit room. Log to the event stream so it's
+      // visible to admins inspecting why a tile is blank.
+      queueEvent('client_error', 'warning',
+                 { message: 'livekit publish failed: ' + (e.message || e) });
+    }
   }
 
   // -------------------------- bootstrap --------------------------------

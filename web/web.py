@@ -1451,6 +1451,10 @@ def _proctor_ctx_for(contest: Contest) -> Optional[dict]:
         'create_session_url': url_for('.proctor_create_session'),
         'setup_url': url_for('.proctor_setup', contest=contest),
         'proctor_url': _public_proctor_base_url(),
+        # LiveKit publish target: ``proctor.js`` POSTs to ``livekit_token_url``
+        # to mint a publisher token then opens a Room connection to
+        # ``livekit_url``. Admin live page subscribes to the same Room.
+        'livekit_url': LiveKitConfig.url,
     }
     if active is not None:
         base.update({
@@ -1464,6 +1468,8 @@ def _proctor_ctx_for(contest: Contest) -> Optional[dict]:
             'signal_stream_url': url_for('.proctor_signal_stream_student',
                                          sid=active.id),
             'snapshot_url': url_for('.proctor_post_snapshot', sid=active.id),
+            'livekit_token_url': url_for('.proctor_livekit_token',
+                                         sid=active.id),
         })
     else:
         # Fresh entry. proctor.js POSTs create_session_url first, gets
@@ -1477,6 +1483,7 @@ def _proctor_ctx_for(contest: Contest) -> Optional[dict]:
             'signal_url_template': '/OnlineJudge/api/proctor/sessions/{sid}/signal',
             'signal_stream_url_template': '/OnlineJudge/api/proctor/sessions/{sid}/signal/stream',
             'snapshot_url_template': '/OnlineJudge/api/proctor/sessions/{sid}/snapshot',
+            'livekit_token_url_template': '/OnlineJudge/api/proctor/sessions/{sid}/livekit-token',
         })
     return base
 
