@@ -31,7 +31,10 @@
             <h1 class="problemset-title title-nav">
                 <span class="title-nav__title">{{ contest.name }}</span>
                 <span class="title-nav__nav btn-group--title-nav">
-                    {%- if problems_visible and contest.problems | length > 2 -%}
+                    {# 「打开所有题目」 opens each problem in a new tab — in kiosk mode
+                       every new tab counts as a tab-switch violation, so just hide
+                       it: the in-page iframe viewer already serves the same purpose. #}
+                    {%- if not kiosk and problems_visible and contest.problems | length > 2 -%}
                     <button class="btn btn-outline-primary" id="open-all">打开所有题目</button>
                     {%- endif -%}
                     {% if g.can_write -%}

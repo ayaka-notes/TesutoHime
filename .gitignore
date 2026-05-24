@@ -169,3 +169,6 @@ scripts/localize_problem_images.py
 # from a GitHub Release; downloaded on demand for local dev.
 web/static/lib/clangd/*.wasm
 
+# Local-only design doc.
+PLAN.md
+
