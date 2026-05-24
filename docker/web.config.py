@@ -51,6 +51,7 @@ class S3Config:
         submissions = 'oj-submissions'
         images = 'oj-images'
         attachments = 'oj-attachments'
+        proctoring = 'oj-proctoring'
 
 
 class LoginConfig:
@@ -77,6 +78,30 @@ class SchedulerConfig:
 class CustomRunConfig:
     # Base URL of the judger's custom-run service (the web IDE "self-test").
     base_url = _env('CUSTOM_RUN_URL', 'http://judger:5200/')
+
+
+class ProctorConfig:
+    # In-cluster URL used by web -> proctor2 (finalize / cleanup).
+    base_url = _env('PROCTOR_BASE_URL', 'http://proctor2:5300/')
+    # Browser-facing URL the student's machine resolves. In a dockerized
+    # deployment this typically routes through the same reverse proxy as
+    # /OnlineJudge/, so it shares the host name.
+    public_url = _env('PROCTOR_PUBLIC_URL', 'http://localhost:5300/')
+    internal_auth = _env('PROCTOR_INTERNAL_AUTH', 'Bearer oj-internal-secret')
+
+
+class LiveKitConfig:
+    """LiveKit SFU coordinates. Browsers connect to ``url`` (ws:// or
+    wss:// in production); the web server signs short-lived JWTs with
+    ``api_key`` + ``api_secret`` so each session can publish/subscribe
+    within its contest's room. Rotate the secret on every deploy.
+    """
+    url = _env('LIVEKIT_URL', 'ws://localhost:7880')
+    api_key = _env('LIVEKIT_API_KEY', 'oj_proctor_key')
+    api_secret = _env(
+        'LIVEKIT_API_SECRET',
+        'oj_proctor_secret_change_me_to_64_chars_long_random_string_xxxxxxxxxxx',
+    )
 
 
 class JudgeConfig:
