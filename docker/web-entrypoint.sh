@@ -20,8 +20,13 @@ else
 fi
 
 echo "[web] starting gunicorn on 0.0.0.0:5000"
+# gthread by default so the admin proctor live page's SSE long-poll
+# doesn't pin a whole worker; one gunicorn worker × N threads still
+# answers other requests while the SSE keeps streaming.
 exec gunicorn \
     --workers "${GUNICORN_WORKERS:-4}" \
+    --worker-class "${GUNICORN_WORKER_CLASS:-gthread}" \
+    --threads "${GUNICORN_THREADS:-16}" \
     --bind 0.0.0.0:5000 \
     --timeout 120 \
     --access-logfile - \
